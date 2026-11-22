@@ -1,0 +1,8 @@
+{
+  "name": "launcher-mobile-updates",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {"test": "node --test", "deploy": "wrangler deploy", "dev": "wrangler dev"},
+  "devDependencies": {"wrangler": "4.166.0"}
+}

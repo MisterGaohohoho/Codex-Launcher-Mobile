@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.LauncherCompanion" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:colorAccent">#00825B</item>
+    </style>
+    <color name="launcher_icon_background">#101010</color>
+</resources>

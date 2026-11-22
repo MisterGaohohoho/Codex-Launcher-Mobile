@@ -1,0 +1,30 @@
+Launcher Mobile third-party software
+
+Launcher Mobile is licensed under the MIT license in the source repository.
+The following directly included components are licensed under Apache-2.0:
+
+AndroidX / Jetpack Compose / Material 3 — The Android Open Source Project
+https://android.googlesource.com/platform/frameworks/support/
+
+Kotlin and kotlinx.coroutines / kotlinx.serialization — JetBrains and contributors
+https://github.com/JetBrains/kotlin
+https://github.com/Kotlin/kotlinx.coroutines
+https://github.com/Kotlin/kotlinx.serialization
+
+OkHttp and Okio — Square and contributors
+https://github.com/square/okhttp
+https://github.com/square/okio
+
+Markwon — Dimitry Ivanov and contributors
+https://github.com/noties/Markwon
+
+ZXing Android Embedded — Journey Mobile and contributors
+https://github.com/journeyapps/zxing-android-embedded
+
+ZXing — ZXing authors
+https://github.com/zxing/zxing
+
+CommonMark Java (included by Markwon) uses the BSD 2-Clause license in
+commonmark-license.txt. Apache-2.0 is included in apache-2.0.txt.
+
+This notice does not change the license or copyright of any dependency.

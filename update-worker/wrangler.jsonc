@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "launcher-mobile-updates",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-22",
+  "routes": [{"pattern": "launcher.laogaohohoho.me", "custom_domain": true}],
+  "vars": {"GITHUB_REPOSITORY": "MisterGaohohoho/Codex-Launcher-Mobile"},
+  "observability": {"enabled": true}
+}

@@ -1,0 +1,323 @@
+package com.codexlauncher.companion.data
+
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.*
+
+fun JsonElement?.obj(): JsonObject = this as? JsonObject ?: JsonObject(emptyMap())
+
+fun JsonElement?.text(fallback: String = ""): String =
+    (this as? JsonPrimitive)?.contentOrNull ?: fallback
+
+fun JsonElement?.list(): List<JsonElement> = (this as? JsonArray)?.toList() ?: emptyList()
+
+fun jsonObject(vararg values: Pair<String, JsonElement>): JsonObject = JsonObject(mapOf(*values))
+
+fun jsonText(value: String) = JsonPrimitive(value)
+
+@Serializable
+data class AdminCommand(
+    val requestId: String,
+    val action: String,
+    val input: JsonObject,
+    val commandEpoch: String = "",
+    val issuedAt: Long = 0,
+)
+
+@Serializable
+data class ConfigurationEnvelope(
+    val revision: String,
+    val value: JsonObject,
+    val secretFields: List<String> = emptyList(),
+    val applyMode: String = "nextRun",
+    val message: String = "",
+)
+
+@Serializable
+data class StreamBatch(
+    val epoch: String = "",
+    val cursor: Long = 0,
+    val reset: Boolean = false,
+    val events: List<JsonObject> = emptyList(),
+    val approvals: List<JsonObject> = emptyList(),
+    val connected: Boolean = true,
+)
+
+data class WorkThread(
+    val id: String,
+    val title: String,
+    val cwd: String,
+    val status: String,
+    val control: String,
+    val updatedAt: Long,
+    val provider: String,
+    val source: String,
+) {
+    val project: String
+        get() = cwd.replace('\\', '/').trimEnd('/').substringAfterLast('/').ifBlank { "未命名项目" }
+
+    companion object {
+        fun parse(value: JsonObject, control: String = value["control"].text("readOnly")) =
+            WorkThread(
+                value["id"].text(),
+                value["name"].text().ifBlank {
+                    value["preview"].text().take(100).ifBlank { "新会话" }
+                },
+                value["cwd"].text(),
+                value["status"].obj()["type"].text("notLoaded"),
+                control,
+                value["updatedAt"].text().toLongOrNull() ?: 0,
+                value["modelProvider"].text(),
+                value["source"].text("Codex"),
+            )
+    }
+}
+
+data class WorkItem(
+    val id: String,
+    val turnId: String,
+    val kind: String,
+    val title: String,
+    val text: String,
+    val status: String = "",
+    val hasMore: Boolean = false,
+) {
+    companion object {
+        fun parse(item: JsonObject, turn: String): WorkItem? {
+            val kind = item["type"].text()
+            if (kind == "reasoning") return null
+            val text =
+                when (kind) {
+                    "userMessage" ->
+                        item["content"].list().joinToString("\n") { it.obj()["text"].text() }
+                    "agentMessage" -> item["text"].text()
+                    "commandExecution" ->
+                        listOf(item["command"].text(), item["aggregatedOutput"].text())
+                            .filter { it.isNotBlank() }
+                            .joinToString("\n\n")
+                    "fileChange" ->
+                        item["changes"].list().joinToString("\n\n") { change ->
+                            val c = change.obj()
+                            c["path"].text() + "\n" + c["diff"].text()
+                        }
+                    "plan" -> item["text"].text()
+                    "mcpToolCall" ->
+                        listOf(
+                                item["server"].text() + "/" + item["tool"].text(),
+                                item["arguments"]?.toString().orEmpty(),
+                                item["result"]?.toString().orEmpty(),
+                                item["error"]?.toString().orEmpty(),
+                            )
+                            .filter { it.isNotBlank() && it != "null" }
+                            .joinToString("\n\n")
+                    "dynamicToolCall" ->
+                        listOf(
+                                item["tool"].text(),
+                                item["arguments"]?.toString().orEmpty(),
+                                item["contentItems"]?.toString().orEmpty(),
+                            )
+                            .filter { it.isNotBlank() && it != "null" }
+                            .joinToString("\n\n")
+                    "webSearch" -> item["query"].text()
+                    else -> item["text"].text().ifBlank { item["status"].text() }
+                }
+            return WorkItem(
+                item["id"].text("$turn-$kind"),
+                turn,
+                kind,
+                when (kind) {
+                    "userMessage" -> "你"
+                    "agentMessage" -> "Codex"
+                    "commandExecution" -> "执行命令"
+                    "fileChange" -> "文件变更"
+                    "plan" -> "开发计划"
+                    else -> kind
+                },
+                text,
+                item["status"].text(),
+            )
+        }
+    }
+}
+
+data class ThreadDetail(
+    val thread: WorkThread,
+    val items: List<WorkItem>,
+    val activeTurn: String? = null,
+    val nextCursor: String? = null,
+    val diff: String = "",
+) {
+    companion object {
+        fun parse(value: JsonObject): ThreadDetail {
+            val thread = WorkThread.parse(value["thread"].obj(), value["control"].text("readOnly"))
+            val page = value["turnsPage"].obj()
+            val turns =
+                if (page["data"] is JsonArray) page["data"].list().reversed()
+                else value["thread"].obj()["turns"].list()
+            val itemPage = value["itemsPage"] as? JsonObject
+            val pagedItems =
+                itemPage?.get("data").list().reversed().mapNotNull { entry ->
+                    val row = entry.obj()
+                    WorkItem.parse(row["item"].obj(), row["turnId"].text())
+                }
+            val turnItems = turns.flatMap { turn ->
+                val t = turn.obj()
+                val id = t["id"].text()
+                val messages = t["items"].list().mapNotNull { WorkItem.parse(it.obj(), id) }
+                val error = t["error"].obj()["message"].text()
+                if (
+                    error.isBlank() ||
+                        (itemPage != null &&
+                            pagedItems.isNotEmpty() &&
+                            pagedItems.none { it.turnId == id })
+                )
+                    messages
+                else messages + WorkItem("error-$id", id, "error", "执行失败", error, "failed")
+            }
+            val items =
+                if (itemPage == null) turnItems
+                else pagedItems + turnItems.filter { it.kind == "error" }
+            return ThreadDetail(
+                thread,
+                items,
+                value["activeTurnId"].text().ifBlank { null }
+                    ?: turns
+                        .lastOrNull { it.obj()["status"].text() == "inProgress" }
+                        ?.obj()
+                        ?.get("id")
+                        ?.text(),
+                (itemPage ?: page)["nextCursor"].text().ifBlank { null },
+            )
+        }
+    }
+}
+
+data class WorkbenchState(
+    val threads: List<WorkThread> = emptyList(),
+    val nextCursor: String? = null,
+    val detail: ThreadDetail? = null,
+    val capabilities: JsonObject? = null,
+    val settings: JsonObject? = null,
+    val approvals: List<JsonObject> = emptyList(),
+    val models: List<JsonObject> = emptyList(),
+    val loading: Boolean = false,
+    val error: String? = null,
+    val streaming: Boolean = false,
+    val search: String = "",
+    val archived: Boolean = false,
+)
+
+// A history request can finish after a newer stream delta. Preserve newer partial
+// output and loaded earlier pages, while completed server items remain authoritative.
+fun mergeThreadRefresh(fresh: ThreadDetail, live: ThreadDetail): ThreadDetail {
+    if (fresh.thread.id != live.thread.id) return fresh
+    val freshById = fresh.items.associateBy { it.id }
+    val liveById = live.items.associateBy { it.id }
+    val firstShared = live.items.indexOfFirst { it.id in freshById }
+    // A long offline period can leave a gap between history windows. Re-anchor
+    // pagination at the server's latest page instead of appending old turns last.
+    if (firstShared < 0 && fresh.items.isNotEmpty()) {
+        val active =
+            if (fresh.activeTurn != null && fresh.activeTurn == live.activeTurn)
+                live.items.filter { it.turnId == fresh.activeTurn }
+            else emptyList()
+        return fresh.copy(
+            items = (fresh.items + active).distinctBy { it.id },
+            diff = if (fresh.activeTurn == live.activeTurn) live.diff else fresh.diff,
+        )
+    }
+    val earlier = if (firstShared >= 0) live.items.take(firstShared) else emptyList()
+    val newerOnly = live.items.drop(firstShared.coerceAtLeast(0)).filter { it.id !in freshById }
+    val ordered =
+        (earlier + fresh.items + newerOnly).map { item ->
+            val newer = liveById[item.id]
+            if (
+                item.status !in listOf("completed", "failed", "declined") &&
+                    newer != null &&
+                    newer.text.length > item.text.length
+            )
+                newer
+            else item
+        }
+    return fresh.copy(
+        items = ordered,
+        nextCursor = if (earlier.isNotEmpty()) live.nextCursor else fresh.nextCursor,
+        diff = fresh.diff.ifBlank { if (fresh.activeTurn == live.activeTurn) live.diff else "" },
+    )
+}
+
+fun applyWorkbenchEvent(detail: ThreadDetail, event: JsonObject): ThreadDetail {
+    val params = event["params"].obj()
+    if (params["threadId"].text() != detail.thread.id) return detail
+    val method = event["method"].text()
+    val turn = params["turnId"].text(detail.activeTurn.orEmpty())
+    return when (method) {
+        "turn/started" ->
+            detail.copy(
+                activeTurn = params["turn"].obj()["id"].text(),
+                thread = detail.thread.copy(status = "active"),
+                diff = "",
+            )
+        "turn/completed" ->
+            detail.copy(activeTurn = null, thread = detail.thread.copy(status = "idle"))
+        "thread/status/changed" ->
+            detail.copy(thread = detail.thread.copy(status = params["status"].obj()["type"].text()))
+        "turn/diff/updated" -> detail.copy(diff = params["diff"].text())
+        "turn/plan/updated" -> {
+            val text =
+                listOf(
+                        params["explanation"].text(),
+                        params["plan"].list().joinToString("\n") { step ->
+                            val s = step.obj()
+                            "${if(s["status"].text() == "completed") "✓" else "○"} ${s["step"].text()}"
+                        },
+                    )
+                    .filter { it.isNotBlank() }
+                    .joinToString("\n\n")
+            detail.copy(
+                items =
+                    detail.items.filterNot { it.id == "plan-$turn" } +
+                        WorkItem("plan-$turn", turn, "plan", "开发计划", text)
+            )
+        }
+        "error" ->
+            detail.copy(
+                items =
+                    detail.items.filterNot { it.id == "error-$turn" } +
+                        WorkItem(
+                            "error-$turn",
+                            turn,
+                            "error",
+                            "执行失败",
+                            params["error"].obj()["message"].text(params["message"].text()),
+                            "failed",
+                        )
+            )
+        "item/started",
+        "item/completed" -> {
+            val item = WorkItem.parse(params["item"].obj(), turn) ?: return detail
+            val existing = detail.items.indexOfFirst { it.id == item.id }
+            detail.copy(
+                items =
+                    if (existing < 0) detail.items + item
+                    else detail.items.toMutableList().apply { set(existing, item) }
+            )
+        }
+        "item/agentMessage/delta",
+        "item/commandExecution/outputDelta" -> {
+            val id = params["itemId"].text()
+            val existing = detail.items.indexOfFirst { it.id == id }
+            val kind = if (method.contains("agentMessage")) "agentMessage" else "commandExecution"
+            val before =
+                detail.items.getOrNull(existing)
+                    ?: WorkItem(id, turn, kind, if (kind == "agentMessage") "Codex" else "执行命令", "")
+            val item =
+                before.copy(text = (before.text + params["delta"].text()).takeLast(128 * 1024))
+            detail.copy(
+                items =
+                    if (existing < 0) detail.items + item
+                    else detail.items.toMutableList().apply { set(existing, item) }
+            )
+        }
+        else -> detail
+    }
+}
