@@ -1,5 +1,9 @@
-Fixes missing outgoing messages when continuing a forked session. Submitted text appears immediately and remains visible while the PC compacts context, reconnects, or waits for a response.
+Redesigns the entire mobile interface with a neutral iOS-inspired light/dark theme, searchable conversation sidebar, compact navigation, floating composer, and native transitions.
 
-Adds delivery states and context-compaction progress. Temporary upstream retries no longer appear as execution failures, and confirmed server messages replace local copies without duplicates.
+Adds explicit Continue original session and Create a branch choices. Original continuation preserves the thread ID when the PC gateway can control it. Independent history remains read-only with a connection-settings explanation. Unsent drafts are kept separately while switching conversations.
+
+Replaces persistent configuration forms with grouped rows, switches, selection sheets, numeric steppers, and staged editors. Settings, providers, credentials, live controls, and request filters share the new layout. Configuration saves retain revision checking and submit only changed fields.
+
+Retains message delivery states, context-compaction progress, retry handling, approval controls, the original icon, and the existing secure pairing and APK update protocols.
 
 Compatible with Launcher desktop 2.8.0-beta.1. No desktop reinstall or new pairing is required.

@@ -634,6 +634,7 @@ constructor(
     private fun applyWorkbenchResult(action: String, result: JsonObject) {
         when (action) {
             "create",
+            "attach",
             "fork" ->
                 result["thread"]
                     .obj()["id"]

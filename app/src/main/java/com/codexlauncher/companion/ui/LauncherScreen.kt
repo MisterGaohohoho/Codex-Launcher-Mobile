@@ -17,6 +17,7 @@ import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -25,10 +26,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.codexlauncher.companion.*
+import com.codexlauncher.companion.R
 import com.codexlauncher.companion.data.*
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 
 data class LauncherActions(
@@ -59,10 +62,10 @@ data class LauncherActions(
     val installUpdate: () -> Unit = {},
 )
 
-private val destinations =
+internal val destinations =
     listOf(
         "总览" to Icons.Outlined.SpaceDashboard,
-        "工作台" to Icons.Outlined.Forum,
+        "工作台" to Icons.Outlined.ChatBubbleOutline,
         "运行" to Icons.Outlined.Tune,
         "设置" to Icons.Outlined.Settings,
     )
@@ -81,6 +84,10 @@ fun LauncherScreen(
     var pairing by rememberSaveable { mutableStateOf(false) }
     var handledPairing by rememberSaveable { mutableLongStateOf(state.pairingGeneration) }
     var confirmation by remember { mutableStateOf<ConfirmAction?>(null) }
+    var newThread by rememberSaveable { mutableStateOf(false) }
+    val drawer = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    val savedPages = rememberSaveableStateHolder()
     val snackbar = remember { SnackbarHostState() }
     val connected = state.computer != null
     val showPairing = !connected || pairing || state.pairing
@@ -131,157 +138,222 @@ fun LauncherScreen(
             actions.consumeNotice()
         }
     }
+    LaunchedEffect(drawer.isOpen) {
+        if (drawer.isOpen)
+            actions.loadWorkbench(state.workbench.search, state.workbench.archived, false)
+    }
     BackHandler(
-        (pairing && connected) || subpage.isNotEmpty() || showThread || page != 0,
-        onBack = goBack,
+        drawer.isOpen || (pairing && connected) || subpage.isNotEmpty() || showThread || page != 0,
+        onBack = { if (drawer.isOpen) scope.launch { drawer.close() } else goBack() },
     )
-    Scaffold(
-        modifier = Modifier.fillMaxSize().testTag("launcher-screen"),
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(
-                            if (showPairing) "Launcher"
-                            else
-                                when (subpage) {
-                                    "configuration" -> "PC 配置"
-                                    "workbench-settings" -> "工作台连接"
-                                    "usage" -> "用量统计"
-                                    "providers" -> "供应商"
-                                    "credentials" -> "凭据管理"
-                                    "billing" -> "计费管理"
-                                    "schedule" -> "计划任务"
-                                    "maintenance" -> "会话维护"
-                                    else -> if (showThread) "开发会话" else destinations[page].first
-                                },
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Text(
-                            if (showPairing) "连接你的开发电脑" else state.computer?.computerName.orEmpty(),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
+    val closeDrawer = {
+        scope.launch { drawer.close() }
+        Unit
+    }
+    ModalNavigationDrawer(
+        drawerState = drawer,
+        gesturesEnabled = connected && !showPairing && subpage.isEmpty(),
+        drawerContent = {
+            LauncherSidebar(
+                state,
+                page,
+                canControl,
+                actions,
+                closeDrawer,
+                navigate = {
+                    closeDrawer()
+                    navigate(it)
                 },
-                navigationIcon = {
-                    if ((pairing && connected) || subpage.isNotEmpty() || showThread)
-                        IconButton(onClick = goBack) {
-                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回")
-                        }
+                openThread = {
+                    closeDrawer()
+                    page = 1
+                    subpage = ""
+                    actions.openThread(it)
                 },
-                actions = {
-                    if (connected && !showPairing) {
-                        StatusLabel(if (fresh) "在线" else "离线", fresh)
-                        IconButton(onClick = actions.refresh, enabled = !state.busy) {
-                            Icon(Icons.Outlined.Refresh, "刷新电脑状态")
-                        }
-                    }
+                create = {
+                    closeDrawer()
+                    page = 1
+                    subpage = ""
+                    newThread = true
                 },
-                colors =
-                    TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.background
-                    ),
+                connectionSettings = {
+                    closeDrawer()
+                    settingsPage("workbench-settings")
+                },
             )
         },
-        bottomBar = {
-            if (connected && !showPairing && !showThread)
-                NavigationBar(
-                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                    tonalElevation = 0.dp,
-                ) {
-                    destinations.forEachIndexed { index, (title, icon) ->
-                        NavigationBarItem(
-                            selected = page == index,
-                            onClick = { navigate(index) },
-                            icon = {
-                                if (index == 1 && state.workbench.approvals.isNotEmpty())
-                                    BadgedBox(
-                                        badge = {
-                                            Badge {
-                                                Text(state.workbench.approvals.size.toString())
-                                            }
-                                        }
-                                    ) {
-                                        Icon(icon, null)
-                                    }
-                                else Icon(icon, null)
-                            },
-                            label = { Text(title, maxLines = 1) },
-                            modifier = Modifier.testTag("tab-$index"),
+    ) {
+        Scaffold(
+            modifier = Modifier.fillMaxSize().testTag("launcher-screen"),
+            topBar = {
+                CenterAlignedTopAppBar(
+                    title = {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                if (showPairing) "Launcher"
+                                else
+                                    when (subpage) {
+                                        "configuration" -> "PC 配置"
+                                        "workbench-settings" -> "工作台连接"
+                                        "usage" -> "用量统计"
+                                        "providers" -> "供应商"
+                                        "credentials" -> "凭据管理"
+                                        "billing" -> "计费管理"
+                                        "schedule" -> "计划任务"
+                                        "maintenance" -> "会话维护"
+                                        "updates" -> "应用更新"
+                                        else ->
+                                            if (showThread)
+                                                state.workbench.detail?.thread?.title.orEmpty()
+                                            else destinations[page].first
+                                    },
+                                fontWeight = FontWeight.SemiBold,
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                if (showPairing) "你的移动工作台"
+                                else if (showThread)
+                                    state.workbench.detail?.thread?.project.orEmpty()
+                                else
+                                    state.computer?.computerName.orEmpty() +
+                                        if (fresh) " · 在线" else " · 离线",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    },
+                    navigationIcon = {
+                        if ((pairing && connected) || subpage.isNotEmpty())
+                            CircleAction(
+                                Icons.AutoMirrored.Outlined.ArrowBack,
+                                "返回",
+                                goBack,
+                                Modifier.padding(start = 4.dp),
+                            )
+                        else if (connected && !showPairing)
+                            CircleAction(
+                                Icons.Outlined.Menu,
+                                "打开会话侧栏",
+                                { scope.launch { drawer.open() } },
+                                Modifier.padding(start = 4.dp).testTag("open-sidebar"),
+                            )
+                    },
+                    actions = {
+                        if (connected && !showPairing) {
+                            if (page == 1 && subpage.isEmpty())
+                                CircleAction(
+                                    Icons.Outlined.Create,
+                                    "新会话",
+                                    { newThread = true },
+                                    Modifier.padding(end = 4.dp).testTag("toolbar-new-thread"),
+                                    enabled = canControl,
+                                )
+                            else
+                                CircleAction(
+                                    Icons.Outlined.Refresh,
+                                    "刷新电脑状态",
+                                    actions.refresh,
+                                    Modifier.padding(end = 4.dp),
+                                    enabled = !state.busy,
+                                )
+                        }
+                    },
+                    colors =
+                        TopAppBarDefaults.topAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.background
+                        ),
+                )
+            },
+            bottomBar = {
+                if (connected && !showPairing && !showThread && subpage.isEmpty())
+                    BottomDock(page, navigate, state.workbench.approvals.size)
+            },
+            snackbarHost = { SnackbarHost(snackbar) },
+        ) { padding ->
+            Column(Modifier.padding(padding).fillMaxSize()) {
+                if (connected && !showPairing && !fresh)
+                    Banner(state.connectionError ?: "正在连接电脑…", error = true)
+                if (state.uncertainCommand != null)
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "有一项操作尚未确认结果",
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall,
                         )
+                        TextButton(onClick = actions.retryCommand, enabled = canControl) {
+                            Text("核对结果")
+                        }
                     }
-                }
-        },
-        snackbarHost = { SnackbarHost(snackbar) },
-    ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize()) {
-            if (connected && !showPairing && !fresh)
-                Banner(state.connectionError ?: "正在连接电脑…", error = true)
-            if (state.uncertainCommand != null)
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        "有一项操作尚未确认结果",
-                        modifier = Modifier.weight(1f),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    TextButton(onClick = actions.retryCommand, enabled = canControl) {
-                        Text("核对结果")
+                AnimatedContent(
+                    targetState =
+                        if (showPairing) "pairing"
+                        else subpage.ifEmpty { if (showThread) "thread" else "page-$page" },
+                    transitionSpec = {
+                        (fadeIn(tween(180)) + slideInHorizontally(tween(220)) { it / 16 })
+                            .togetherWith(fadeOut(tween(100)))
+                    },
+                    label = "pageTransition",
+                    modifier = Modifier.weight(1f),
+                ) { route ->
+                    when (route) {
+                        "pairing" -> PairingPage(state, cameraError, actions)
+                        "configuration" -> ConfigurationPage(state, canControl, actions)
+                        "workbench-settings" -> WorkbenchSettingsPage(state, canControl, actions)
+                        "updates" ->
+                            LazyColumn(contentPadding = PaddingValues(20.dp)) {
+                                item { UpdatePanel(state.update, actions) }
+                            }
+                        "usage",
+                        "providers",
+                        "billing",
+                        "credentials",
+                        "schedule",
+                        "maintenance" ->
+                            AdminPage(route, state, canControl, actions) { confirmation = it }
+                        "thread" ->
+                            savedPages.SaveableStateProvider(
+                                "thread-" + state.workbench.detail?.thread?.id.orEmpty()
+                            ) {
+                                WorkbenchDetailPage(
+                                    state,
+                                    canControl,
+                                    actions,
+                                    settings = { settingsPage("workbench-settings") },
+                                    confirm = { confirmation = it },
+                                )
+                            }
+                        "page-0" ->
+                            OverviewPage(state, now, actions, navigate, settingsPage) {
+                                confirmation = it
+                            }
+                        "page-1" ->
+                            WorkbenchListPage(
+                                state,
+                                canControl,
+                                actions,
+                                { settingsPage("workbench-settings") },
+                            )
+                        "page-2" ->
+                            RunPage(state, now, actions, { settingsPage("configuration") }) {
+                                confirmation = it
+                            }
+                        else ->
+                            SettingsPage(state, actions, settingsPage, { pairing = true }) {
+                                confirmation = it
+                            }
                     }
-                }
-            AnimatedContent(
-                targetState =
-                    if (showPairing) "pairing"
-                    else subpage.ifEmpty { if (showThread) "thread" else "page-$page" },
-                transitionSpec = {
-                    (fadeIn(tween(180)) + slideInHorizontally(tween(220)) { it / 16 }).togetherWith(
-                        fadeOut(tween(100))
-                    )
-                },
-                label = "pageTransition",
-                modifier = Modifier.weight(1f),
-            ) { route ->
-                when (route) {
-                    "pairing" -> PairingPage(state, cameraError, actions)
-                    "configuration" -> ConfigurationPage(state, canControl, actions)
-                    "workbench-settings" -> WorkbenchSettingsPage(state, canControl, actions)
-                    "usage",
-                    "providers",
-                    "billing",
-                    "credentials",
-                    "schedule",
-                    "maintenance" ->
-                        AdminPage(route, state, canControl, actions) { confirmation = it }
-                    "thread" ->
-                        WorkbenchDetailPage(state, canControl, actions) { confirmation = it }
-                    "page-0" ->
-                        OverviewPage(state, now, actions, navigate, settingsPage) {
-                            confirmation = it
-                        }
-                    "page-1" ->
-                        WorkbenchListPage(
-                            state,
-                            canControl,
-                            actions,
-                            { settingsPage("workbench-settings") },
-                        )
-                    "page-2" ->
-                        RunPage(state, now, actions, { settingsPage("configuration") }) {
-                            confirmation = it
-                        }
-                    else ->
-                        SettingsPage(state, actions, settingsPage, { pairing = true }) {
-                            confirmation = it
-                        }
                 }
             }
         }
     }
+    if (newThread) NewThreadSheet(state, canControl, actions) { newThread = false }
     confirmation?.let { confirm ->
         AlertDialog(
             onDismissRequest = { confirmation = null },
@@ -408,17 +480,38 @@ fun EmptyState(
 @Composable
 fun PairingPage(state: CompanionState, cameraError: String?, actions: LauncherActions) {
     var text by rememberSaveable { mutableStateOf("") }
+    var paste by rememberSaveable { mutableStateOf(false) }
+    var updates by rememberSaveable { mutableStateOf(false) }
     LazyColumn(
         Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
+        contentPadding = PaddingValues(24.dp),
+        verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
-        item { EmptyState(Icons.Outlined.Devices, "把电脑带在身边", "查看运行状态、调整配置，从手机继续你的开发会话。") }
+        item {
+            Column(
+                Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                androidx.compose.foundation.Image(
+                    androidx.compose.ui.res.painterResource(R.drawable.launcher_artwork),
+                    null,
+                    Modifier.size(76.dp),
+                )
+                Text("连接你的电脑", style = MaterialTheme.typography.headlineLarge)
+                Text(
+                    "运行、配置和开发对话，都在手边。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         item {
             Panel {
-                Text("连接开发电脑", style = MaterialTheme.typography.headlineSmall)
+                Text("在电脑的“手机连接”页生成配对码。", style = MaterialTheme.typography.bodyLarge)
                 Text(
-                    "在 PC 的手机连接页生成配对码。两端使用同一局域网，外出时连接 Tailscale。",
+                    "两端连接同一局域网，外出时使用 Tailscale。",
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Button(
@@ -426,47 +519,65 @@ fun PairingPage(state: CompanionState, cameraError: String?, actions: LauncherAc
                     enabled = !state.busy,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                 ) {
-                    Icon(Icons.Outlined.QrCodeScanner, null)
+                    Icon(Icons.Outlined.QrCodeScanner, null, Modifier.size(20.dp))
                     Spacer(Modifier.width(10.dp))
                     Text("扫码连接电脑")
                 }
+                if (state.pairing)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        Text("正在验证并连接电脑…", style = MaterialTheme.typography.bodySmall)
+                    }
             }
         }
-        if (state.pairing)
-            item {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-                    Text("正在验证并连接电脑…")
-                }
-            }
         (cameraError ?: state.pairingError)?.let { item { Banner(it, true) } }
         item {
-            Panel {
-                Text("也可以粘贴配对内容", style = MaterialTheme.typography.titleMedium)
-                OutlinedTextField(
-                    text,
-                    { if (it.length <= 4096) text = it },
-                    label = { Text("电脑复制的配对内容") },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 3,
-                    maxLines = 5,
-                    enabled = !state.busy,
+            SettingsGroup {
+                SettingRow(
+                    "粘贴配对内容",
+                    icon = Icons.Outlined.ContentPaste,
+                    onClick = { paste = !paste },
                 )
-                OutlinedButton(
-                    onClick = { actions.pair(text) },
-                    enabled = text.isNotBlank() && !state.busy,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("验证并配对")
+                AnimatedVisibility(paste) {
+                    Column(
+                        Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        OutlinedTextField(
+                            text,
+                            { if (it.length <= 4096) text = it },
+                            label = { Text("电脑复制的配对内容") },
+                            modifier = Modifier.fillMaxWidth(),
+                            minLines = 3,
+                            maxLines = 5,
+                            enabled = !state.busy,
+                        )
+                        Button(
+                            onClick = { actions.pair(text) },
+                            enabled = text.isNotBlank() && !state.busy,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("验证并配对")
+                        }
+                    }
                 }
             }
         }
-        item { UpdatePanel(state.update, actions) }
+        item {
+            SettingsGroup {
+                SettingRow(
+                    "应用更新",
+                    BuildConfig.VERSION_NAME,
+                    icon = Icons.Outlined.SystemUpdate,
+                    onClick = { updates = true },
+                )
+            }
+        }
     }
+    if (updates) EditorSheet("应用更新", { updates = false }) { UpdatePanel(state.update, actions) }
 }
 
 @Composable
@@ -520,12 +631,13 @@ fun statusTitle(status: String) =
         else -> status.ifBlank { "等待同步" }
     }
 
-fun timeLabel(value: String): String = runCatching {
-    DateTimeFormatter.ofPattern("HH:mm:ss")
-        .withZone(ZoneId.systemDefault())
-        .format(Instant.parse(value))
-}
-    .getOrDefault(value.take(19))
+fun timeLabel(value: String): String =
+    runCatching {
+            DateTimeFormatter.ofPattern("HH:mm:ss")
+                .withZone(ZoneId.systemDefault())
+                .format(Instant.parse(value))
+        }
+        .getOrDefault(value.take(19))
 
 fun durationLabel(seconds: Long): String =
     if (seconds >= 3600) "%d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60)

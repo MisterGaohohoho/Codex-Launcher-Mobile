@@ -40,106 +40,92 @@ fun OverviewPage(
     LazyColumn(
         Modifier.fillMaxSize().testTag("monitor-list"),
         contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
+        verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
         item {
-            Surface(
-                shape = MaterialTheme.shapes.extraLarge,
-                color = MaterialTheme.colorScheme.primaryContainer,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.Outlined.Hub,
-                            null,
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Text(
-                            "ANY 运行状态",
-                            Modifier.weight(1f),
-                            style = MaterialTheme.typography.labelLarge,
-                        )
-                        Text(
-                            state.snapshot?.configuration?.provider.orEmpty(),
-                            style = MaterialTheme.typography.labelMedium,
-                        )
-                    }
-                    Text(
-                        runTitle(run),
-                        style = MaterialTheme.typography.headlineLarge,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        if (run?.active == true) "任务在电脑上持续执行" else "启动后，随时从这里查看进展",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    RunControl(state, now, actions, confirm)
-                }
-            }
+            Text("你的工作台", style = MaterialTheme.typography.headlineMedium)
+            Text(
+                "电脑上的工作，随时接着做。",
+                Modifier.padding(top = 6.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Panel(Modifier.weight(1f)) {
-                    Text("运行时间", style = MaterialTheme.typography.labelMedium)
+            Panel {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Hub, null, Modifier.size(20.dp))
                     Text(
-                        durationLabel(run?.elapsedSeconds ?: 0),
-                        style = MaterialTheme.typography.titleLarge,
-                        fontFamily = FontFamily.Monospace,
+                        "ANY",
+                        Modifier.weight(1f).padding(start = 9.dp),
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        state.snapshot?.configuration?.provider.orEmpty(),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Panel(Modifier.weight(1f)) {
-                    Text("请求次数", style = MaterialTheme.typography.labelMedium)
-                    Text(
-                        (run?.attempt ?: 0).toString(),
-                        style = MaterialTheme.typography.titleLarge,
-                        fontFamily = FontFamily.Monospace,
+                Text(
+                    runTitle(run),
+                    style = MaterialTheme.typography.headlineLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            "运行时间",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            durationLabel(run?.elapsedSeconds ?: 0),
+                            style = MaterialTheme.typography.titleLarge,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                    VerticalDivider(
+                        Modifier.height(42.dp).padding(horizontal = 20.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant,
                     )
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            "请求次数",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            (run?.attempt ?: 0).toString(),
+                            style = MaterialTheme.typography.titleLarge,
+                        )
+                    }
                 }
+                RunControl(state, now, actions, confirm)
             }
         }
         if (state.workbench.approvals.isNotEmpty())
             item {
-                Panel(Modifier.clickable { navigate(1) }) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Icon(
-                            Icons.Outlined.PendingActions,
-                            null,
-                            tint = MaterialTheme.colorScheme.primary,
-                        )
-                        Column {
-                            Text(
-                                "${state.workbench.approvals.size} 项待你确认",
-                                style = MaterialTheme.typography.titleMedium,
-                            )
-                            Text("打开工作台继续处理", style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
+                SettingsGroup {
+                    SettingRow(
+                        "有 ${state.workbench.approvals.size} 项等待确认",
+                        subtitle = "打开工作台处理",
+                        icon = Icons.Outlined.PendingActions,
+                        onClick = { navigate(1) },
+                    )
                 }
             }
         item {
-            SectionTitle(
-                "开发工作台",
-                "电脑执行，手机指挥",
-                action = { TextButton(onClick = { navigate(1) }) { Text("全部会话") } },
-            )
+            SectionTitle("最近会话", action = { TextButton(onClick = { navigate(1) }) { Text("全部") } })
         }
         if (state.workbench.threads.isEmpty())
             item {
-                Panel {
-                    Text(
-                        if (state.workbench.loading) "正在读取开发会话…" else "从一个开发会话开始",
-                        style = MaterialTheme.typography.titleMedium,
+                SettingsGroup {
+                    SettingRow(
+                        if (state.workbench.loading) "正在读取会话…" else "开始一段开发对话",
+                        subtitle = "查看回复、执行进展与代码变更",
+                        icon = Icons.Outlined.ChatBubbleOutline,
+                        onClick = { navigate(1) },
                     )
-                    Text(
-                        "选择 PC 上的项目，查看 AI 回复、执行记录和代码变更。",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    OutlinedButton(onClick = { navigate(1) }) { Text("打开工作台") }
                 }
             }
         items(state.workbench.threads.take(3), key = { it.id }) { thread ->
@@ -148,28 +134,27 @@ fun OverviewPage(
                 actions.openThread(thread.id)
             }
         }
-        item { SectionTitle("快捷管理") }
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                FilledTonalButton(
+            SettingsGroup("快捷管理") {
+                SettingRow(
+                    "PC 配置",
+                    "实时同步",
+                    icon = Icons.Outlined.Tune,
                     onClick = { settings("configuration") },
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Outlined.Tune, null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("PC 配置")
-                }
-                OutlinedButton(onClick = { settings("usage") }, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Outlined.BarChart, null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("用量")
-                }
+                )
+                SettingDivider(50)
+                SettingRow(
+                    "用量与请求记录",
+                    icon = Icons.Outlined.BarChart,
+                    onClick = { settings("usage") },
+                )
             }
         }
         item {
             Text(
-                "PC ${state.snapshot?.version ?: "等待同步"} · 断开手机不会停止电脑任务",
-                style = MaterialTheme.typography.labelSmall,
+                "断开手机后，任务仍在电脑上继续。",
+                Modifier.padding(horizontal = 12.dp),
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -219,16 +204,13 @@ fun RunPage(
     val run = state.snapshot?.status
     val canControl = state.canControl(now)
     Column {
-        PrimaryTabRow(tab) {
-            listOf("控制", "进程", "日志").forEachIndexed { index, text ->
-                Tab(
-                    selected = tab == index,
-                    onClick = { tab = index },
-                    text = { Text(text) },
-                    modifier = Modifier.testTag("run-tab-$index"),
-                )
-            }
-        }
+        SegmentedBar(
+            listOf("控制", "进程", "日志"),
+            tab,
+            { tab = it },
+            Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+            "run-tab",
+        )
         when (tab) {
             0 ->
                 LazyColumn(
@@ -262,56 +244,47 @@ fun RunPage(
                         }
                     }
                     item {
-                        Panel {
-                            SectionTitle("保活设置", "对当前运行立即生效")
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text("成功后自动保活", Modifier.weight(1f))
-                                Switch(
-                                    checked = config?.keepAliveEnabled == true,
-                                    enabled = canControl,
-                                    onCheckedChange = { enabled ->
-                                        val id = run?.takeIf { it.active }?.runId
-                                        if (enabled) actions.keepAlive(true, null, id)
-                                        else
-                                            confirm(
-                                                ConfirmAction("关闭保活", "当前请求完成后不再安排下一次保活。") {
-                                                    actions.keepAlive(false, null, id)
-                                                }
-                                            )
-                                    },
-                                )
-                            }
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                listOf(
-                                        "configured" to "原始内容",
-                                        "questionBank" to "随机题库",
-                                        "ascii" to "ASCII 短码",
+                        SettingsGroup("保持连接", footer = "这些选项对当前运行立即生效。") {
+                            ToggleSetting(
+                                "成功后自动保活",
+                                config?.keepAliveEnabled == true,
+                                enabled = canControl,
+                            ) { enabled ->
+                                val id = run?.takeIf { it.active }?.runId
+                                if (enabled) actions.keepAlive(true, null, id)
+                                else
+                                    confirm(
+                                        ConfirmAction("关闭保活", "当前请求完成后不再安排下一次保活。") {
+                                            actions.keepAlive(false, null, id)
+                                        }
                                     )
-                                    .forEach { (mode, name) ->
-                                        FilterChip(
-                                            selected = config?.contentMode == mode,
-                                            onClick = {
-                                                actions.keepAlive(
-                                                    null,
-                                                    mode,
-                                                    run?.takeIf { it.active }?.runId,
-                                                )
-                                            },
-                                            enabled =
-                                                canControl &&
-                                                    (mode == "configured" ||
-                                                        config?.contentModeSupported == true) &&
-                                                    (mode != "questionBank" ||
-                                                        config?.questionBankAvailable == true),
-                                            label = { Text(name) },
-                                        )
-                                    }
                             }
-                            KeyValue("保活间隔", "${(config?.keepAliveIntervalSeconds ?: 0) / 60} 分钟")
-                            run?.nextRequestAt?.let { KeyValue("下一次请求", timeLabel(it)) }
+                            SettingDivider()
+                            val choices =
+                                listOf("configured" to "原始内容") +
+                                    (if (
+                                        config?.questionBankAvailable == true &&
+                                            config.contentModeSupported
+                                    )
+                                        listOf("questionBank" to "随机题库")
+                                    else emptyList()) +
+                                    (if (config?.contentModeSupported == true)
+                                        listOf("ascii" to "ASCII 短码")
+                                    else emptyList())
+                            ChoiceSetting(
+                                "保活内容",
+                                config?.contentMode.orEmpty(),
+                                choices,
+                                enabled = canControl,
+                            ) { mode ->
+                                actions.keepAlive(null, mode, run?.takeIf { it.active }?.runId)
+                            }
+                            SettingDivider()
+                            SettingRow("保活间隔", "${(config?.keepAliveIntervalSeconds ?: 0) / 60} 分钟")
+                            run?.nextRequestAt?.let {
+                                SettingDivider()
+                                SettingRow("下一次请求", timeLabel(it))
+                            }
                         }
                     }
                     item {
@@ -391,16 +364,7 @@ private fun LogPage(logs: List<LogLine>, truncated: Boolean) {
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item {
-            OutlinedTextField(
-                search,
-                { search = it },
-                label = { Text("搜索运行日志") },
-                leadingIcon = { Icon(Icons.Outlined.Search, null) },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-            )
-        }
+        item { SearchField(search, { search = it }, "搜索运行日志") }
         item {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf("all" to "全部", "warn" to "警告", "error" to "错误").forEach { (id, title) ->
@@ -473,11 +437,7 @@ fun WorkerDetailSheet(state: CompanionState, actions: LauncherActions) {
                 }
                 IconButton(onClick = actions.closeDetails) { Icon(Icons.Outlined.Close, "关闭请求详情") }
             }
-            PrimaryTabRow(tab) {
-                listOf("请求内容", "模型回复", "诊断").forEachIndexed { index, title ->
-                    Tab(tab == index, { tab = index }, text = { Text(title) })
-                }
-            }
+            SegmentedBar(listOf("请求内容", "模型回复", "诊断"), tab, { tab = it })
             if (state.detailsLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
             state.detailsError?.let {
                 Banner(it, true)

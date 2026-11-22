@@ -10,7 +10,7 @@ import com.codexlauncher.companion.data.UpdateState
 @Composable
 fun UpdatePanel(state: UpdateState, actions: LauncherActions) {
     Panel {
-        SectionTitle("应用更新", "当前版本 ${BuildConfig.VERSION_NAME}")
+        SectionTitle("Launcher Mobile", "当前版本 ${BuildConfig.VERSION_NAME}")
         if (state.checking) LinearProgressIndicator(Modifier.fillMaxWidth())
         state.error?.let {
             Text(
@@ -46,7 +46,7 @@ fun UpdatePanel(state: UpdateState, actions: LauncherActions) {
             Text("检查更新")
         }
         Text(
-            "通过 launcher.laogaohohoho.me 获取更新。下载后校验发布签名、完整性与 APK 签名。",
+            "从 launcher.laogaohohoho.me 获取更新，下载完成后由 Android 确认安装。",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

@@ -27,8 +27,7 @@ fun MarkdownReply(markdown: String) {
     val textColor = colors.onSurface.toArgb()
     val linkColor = colors.primary.toArgb()
     val codeColor = colors.surfaceContainerHighest.toArgb()
-    val textSize =
-        with(LocalDensity.current) { MaterialTheme.typography.bodyMedium.fontSize.toPx() }
+    val textSize = with(LocalDensity.current) { MaterialTheme.typography.bodyLarge.fontSize.toPx() }
     val renderer =
         remember(context, textColor, linkColor, codeColor) {
             Markwon.builder(context)
@@ -69,7 +68,7 @@ fun MarkdownReply(markdown: String) {
             TextView(it).apply {
                 setTextIsSelectable(true)
                 setPadding(0, 0, 0, 0)
-                setLineSpacing(0f, 1.2f)
+                setLineSpacing(0f, 1.35f)
             }
         },
         modifier = Modifier.fillMaxWidth(),

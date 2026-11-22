@@ -1,30 +1,40 @@
 @file:OptIn(
     androidx.compose.material3.ExperimentalMaterial3Api::class,
     androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
 )
 
 package com.codexlauncher.companion.ui
 
 import androidx.compose.animation.animateContentSize
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.ArrowForward
-import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.codexlauncher.companion.*
@@ -33,51 +43,65 @@ import java.util.UUID
 import kotlinx.serialization.json.*
 
 @Composable
-fun ThreadRow(thread: WorkThread, onClick: () -> Unit) {
+fun ThreadRow(
+    thread: WorkThread,
+    selected: Boolean = false,
+    compact: Boolean = false,
+    onLongClick: (() -> Unit)? = null,
+    onClick: () -> Unit,
+) {
     Surface(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).testTag("thread-${thread.id}"),
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        Modifier.fillMaxWidth()
+            .clip(MaterialTheme.shapes.medium)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick,
+                onLongClickLabel = "会话继续方式",
+            )
+            .testTag("thread-${thread.id}"),
+        shape = MaterialTheme.shapes.medium,
+        color = if (selected) MaterialTheme.colorScheme.surfaceContainer else Color.Transparent,
     ) {
-        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(
+            Modifier.padding(
+                horizontal = if (compact) 12.dp else 4.dp,
+                vertical = if (compact) 12.dp else 16.dp,
+            ),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             Row(
-                Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Icon(
-                    Icons.Outlined.FolderOpen,
-                    null,
-                    Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.primary,
-                )
                 Text(
-                    thread.project,
+                    thread.title,
                     Modifier.weight(1f),
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 1,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = if (compact) 1 else 2,
                     overflow = TextOverflow.Ellipsis,
                 )
-                StatusLabel(statusTitle(thread.status), thread.status == "active")
+                if (thread.status in listOf("active", "running", "inProgress"))
+                    Surface(Modifier.size(7.dp), shape = CircleShape, color = Color(0xFF25844E)) {}
+                else if (!compact)
+                    Icon(
+                        Icons.Outlined.ChevronRight,
+                        null,
+                        Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.outline,
+                    )
             }
             Text(
-                thread.title,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 2,
+                thread.project +
+                    if (compact) ""
+                    else
+                        " · " +
+                            if (thread.canContinueOriginal) statusTitle(thread.status) else "历史会话",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    thread.provider.ifBlank { "Codex" },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    if (thread.control == "readOnly") "仅查看" else "可控制",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
         }
     }
 }
@@ -91,47 +115,46 @@ fun WorkbenchListPage(
 ) {
     val workbench = state.workbench
     var search by rememberSaveable { mutableStateOf(workbench.search) }
+    LaunchedEffect(workbench.search) { search = workbench.search }
     var create by rememberSaveable { mutableStateOf(false) }
+    var contextThread by remember { mutableStateOf<WorkThread?>(null) }
+    val threads =
+        workbench.threads.filter {
+            search.isBlank() || it.title.contains(search, true) || it.project.contains(search, true)
+        }
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
-            contentPadding =
-                PaddingValues(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 100.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            Modifier.fillMaxSize().testTag("workbench-list"),
+            contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 12.dp, bottom = 96.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
-                OutlinedTextField(
-                    search,
-                    { search = it },
-                    label = { Text("搜索开发会话") },
-                    modifier = Modifier.fillMaxWidth(),
-                    leadingIcon = { Icon(Icons.Outlined.Search, null) },
-                    trailingIcon = {
-                        IconButton(
-                            onClick = { actions.loadWorkbench(search, workbench.archived, false) }
-                        ) {
-                            Icon(Icons.AutoMirrored.Outlined.ArrowForward, "搜索")
-                        }
-                    },
-                    singleLine = true,
+                Text("继续你的想法", style = MaterialTheme.typography.headlineMedium)
+                Text(
+                    "项目留在电脑，进展随时查看。",
+                    Modifier.padding(top = 6.dp, bottom = 10.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             item {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                SearchField(
+                    search,
+                    { search = it },
+                    "搜索项目或会话",
+                    Modifier.testTag("session-search"),
                 ) {
-                    FilterChip(
-                        !workbench.archived,
-                        { actions.loadWorkbench(search, false, false) },
-                        label = { Text("最近") },
+                    actions.loadWorkbench(search, workbench.archived, false)
+                }
+            }
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SegmentedBar(
+                        listOf("最近", "已归档"),
+                        if (workbench.archived) 1 else 0,
+                        { actions.loadWorkbench(search, it == 1, false) },
+                        Modifier.weight(1f),
                     )
-                    FilterChip(
-                        workbench.archived,
-                        { actions.loadWorkbench(search, true, false) },
-                        label = { Text("已归档") },
-                    )
-                    Spacer(Modifier.weight(1f))
                     IconButton(onClick = settings) {
                         Icon(Icons.Outlined.SettingsEthernet, "工作台连接设置")
                     }
@@ -144,33 +167,40 @@ fun WorkbenchListPage(
                 }
             }
             if (workbench.loading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
-            workbench.error?.let { error -> item { Banner(error, true) } }
-            if (state.computer?.canControl == false)
-                item { Banner("此设备仅有查看权限。使用工作台需在 PC 重新配对并启用管理权限。") }
-            if (workbench.threads.isEmpty() && !workbench.loading)
+            workbench.error?.let { item { Banner(it, true) } }
+            if (state.computer?.canControl == false) item { Banner("此设备仅有查看权限。工作台控制需要 PC 授予管理权限。") }
+            if (threads.isEmpty() && !workbench.loading)
                 item {
                     EmptyState(
-                        Icons.Outlined.Forum,
-                        "开始一项开发任务",
-                        "选择 PC 的项目目录，新建会话后即可对话。已有会话的控制能力取决于所连接的后台。",
+                        Icons.Outlined.ChatBubbleOutline,
+                        if (search.isBlank()) "从一个想法开始" else "没有找到会话",
+                        if (search.isBlank()) "新建会话，在手机上指挥电脑完成开发任务。" else "换个关键词，或按键盘搜索查找更多记录。",
                     )
                 }
-            workbench.threads
+            threads
                 .groupBy { it.project }
-                .forEach { (project, threads) ->
-                    item(key = "group-$project") {
+                .forEach { (project, rows) ->
+                    item(key = "project-$project") {
                         Text(
                             project,
-                            style = MaterialTheme.typography.titleSmall,
+                            Modifier.padding(top = 10.dp),
+                            style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 8.dp),
                         )
                     }
-                    items(threads, key = { it.id }) { ThreadRow(it) { actions.openThread(it.id) } }
+                    items(rows, key = { it.id }) { thread ->
+                        ThreadRow(thread, onLongClick = { contextThread = thread }) {
+                            actions.openThread(thread.id)
+                        }
+                        HorizontalDivider(
+                            thickness = 0.5.dp,
+                            color = MaterialTheme.colorScheme.outlineVariant,
+                        )
+                    }
                 }
             if (workbench.nextCursor != null)
                 item {
-                    OutlinedButton(
+                    TextButton(
                         onClick = { actions.loadWorkbench(search, workbench.archived, true) },
                         enabled = !workbench.loading,
                         modifier = Modifier.fillMaxWidth(),
@@ -178,75 +208,157 @@ fun WorkbenchListPage(
                         Text("加载更多会话")
                     }
                 }
-            workbench.capabilities?.get("message")?.text()?.let {
-                item {
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        }
+        Button(
+            onClick = { create = true },
+            enabled = canControl,
+            modifier =
+                Modifier.align(Alignment.BottomEnd)
+                    .padding(20.dp)
+                    .heightIn(min = 52.dp)
+                    .testTag("new-thread"),
+            elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp),
+        ) {
+            Icon(Icons.Outlined.Create, null, Modifier.size(19.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("新会话")
+        }
+    }
+    if (create) NewThreadSheet(state, canControl, actions) { create = false }
+    contextThread?.let { thread ->
+        SessionChoiceSheet(
+            thread,
+            canControl,
+            { contextThread = null },
+            original = {
+                contextThread = null
+                actions.openThread(thread.id)
+                actions.workbenchAction("attach", buildJsonObject { put("threadId", thread.id) })
+            },
+            branch = {
+                contextThread = null
+                actions.workbenchAction("fork", buildJsonObject { put("threadId", thread.id) })
+            },
+            connectionSettings = {
+                contextThread = null
+                settings()
+            },
+        )
+    }
+}
+
+@Composable
+fun NewThreadSheet(
+    state: CompanionState,
+    enabled: Boolean,
+    actions: LauncherActions,
+    dismiss: () -> Unit,
+) {
+    val workbench = state.workbench
+    var cwd by rememberSaveable { mutableStateOf(workbench.settings?.get("workDir").text()) }
+    var model by rememberSaveable { mutableStateOf("") }
+    EditorSheet(
+        "新建开发会话",
+        dismiss,
+        save = {
+            actions.workbenchAction(
+                "create",
+                buildJsonObject {
+                    put("cwd", cwd.trim())
+                    if (model.isNotBlank()) put("model", model.trim())
+                },
+            )
+            dismiss()
+        },
+        saveEnabled = enabled && cwd.isNotBlank(),
+        saveLabel = "创建",
+    ) {
+        Text(
+            "选择电脑上的项目，开始一段新对话。",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        SettingsGroup("项目") {
+            TextSetting(
+                "项目目录",
+                cwd,
+                "选择或输入 PC 路径",
+                multiline = false,
+                tag = "new-thread-cwd",
+                changed = { cwd = it },
+            )
+            SettingDivider()
+            ModelPicker(model, workbench.models) { model = it }
+        }
+        val recent = workbench.threads.filter { it.cwd.isNotBlank() }.distinctBy { it.cwd }.take(6)
+        if (recent.isNotEmpty())
+            SettingsGroup("最近使用") {
+                recent.forEachIndexed { index, thread ->
+                    if (index > 0) SettingDivider()
+                    SettingRow(
+                        thread.project,
+                        subtitle = thread.cwd,
+                        icon = Icons.Outlined.FolderOpen,
+                        onClick = { cwd = thread.cwd },
+                        trailing = {
+                            if (cwd == thread.cwd)
+                                Icon(Icons.Outlined.Check, "已选择", Modifier.size(20.dp))
+                        },
                     )
                 }
             }
-        }
-        ExtendedFloatingActionButton(
-            onClick = { create = true },
-            expanded = true,
-            icon = { Icon(Icons.Outlined.Add, null) },
-            text = { Text("新会话") },
-            modifier = Modifier.align(Alignment.BottomEnd).padding(20.dp).testTag("new-thread"),
+        Text(
+            "使用电脑上的 Codex 配置、工具和权限。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-    if (create) {
-        var cwd by rememberSaveable { mutableStateOf(workbench.settings?.get("workDir").text()) }
-        var model by rememberSaveable { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { create = false },
-            title = { Text("在 PC 新建会话") },
-            text = {
-                Column(
-                    Modifier.verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Text("任务将使用 PC 的 Codex 配置、工具和权限。", style = MaterialTheme.typography.bodyMedium)
-                    OutlinedTextField(
-                        cwd,
-                        { cwd = it },
-                        label = { Text("PC 项目绝对路径") },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        workbench.threads
-                            .distinctBy { it.cwd }
-                            .take(5)
-                            .forEach { thread ->
-                                SuggestionChip(
-                                    onClick = { cwd = thread.cwd },
-                                    label = { Text(thread.project) },
-                                )
-                            }
-                    }
-                    ModelPicker(model, workbench.models) { model = it }
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        actions.workbenchAction(
-                            "create",
-                            buildJsonObject {
-                                put("cwd", cwd.trim())
-                                if (model.isNotBlank()) put("model", model.trim())
-                            },
-                        )
-                        create = false
-                    },
-                    enabled = canControl && cwd.isNotBlank(),
-                ) {
-                    Text("创建会话")
-                }
-            },
-            dismissButton = { TextButton(onClick = { create = false }) { Text("取消") } },
-        )
+}
+
+@Composable
+fun SessionChoiceSheet(
+    thread: WorkThread,
+    enabled: Boolean,
+    dismiss: () -> Unit,
+    original: () -> Unit,
+    branch: () -> Unit,
+    connectionSettings: () -> Unit,
+) {
+    EditorSheet("选择继续方式", dismiss) {
+        Text(thread.title, style = MaterialTheme.typography.titleMedium)
+        SettingsGroup {
+            SettingRow(
+                "沿用原会话",
+                subtitle =
+                    if (thread.canContinueOriginal) "保留同一个会话和历史，在当前对话中继续。运行中发送的内容会补充给当前任务。"
+                    else "当前只连接到历史记录。需要连接原会话所在的共享后台后才能接入。",
+                icon = Icons.Outlined.ChatBubbleOutline,
+                enabled = enabled && thread.canContinueOriginal,
+                modifier = Modifier.testTag("continue-original"),
+                onClick = original,
+            )
+            SettingDivider()
+            SettingRow(
+                "创建分支",
+                subtitle = "继承已有上下文，创建独立会话。后续消息分别保存，项目文件仍共用。",
+                icon = Icons.Outlined.ForkRight,
+                enabled = enabled,
+                modifier = Modifier.testTag("continue-fork"),
+                onClick = branch,
+            )
+        }
+        if (!thread.canContinueOriginal)
+            TextButton(onClick = connectionSettings, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Outlined.SettingsEthernet, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("连接原会话后台")
+            }
+        if (!enabled)
+            Text(
+                "电脑在线且当前操作完成后，可继续会话。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
     }
 }
 
@@ -255,17 +367,19 @@ fun WorkbenchDetailPage(
     state: CompanionState,
     canControl: Boolean,
     actions: LauncherActions,
+    settings: () -> Unit = {},
     confirm: (ConfirmAction) -> Unit,
 ) {
     val detail = state.workbench.detail ?: return
     var tab by rememberSaveable(detail.thread.id) { mutableIntStateOf(0) }
     var draft by rememberSaveable(detail.thread.id) { mutableStateOf("") }
-    var submitted by remember { mutableStateOf<String?>(null) }
-    var submittedId by remember { mutableStateOf<String?>(null) }
+    var submitted by rememberSaveable(detail.thread.id) { mutableStateOf<String?>(null) }
+    var submittedId by rememberSaveable(detail.thread.id) { mutableStateOf<String?>(null) }
     var menu by remember { mutableStateOf(false) }
     var rename by remember { mutableStateOf(false) }
+    var continuation by remember { mutableStateOf(false) }
     var selectedApproval by remember { mutableStateOf<JsonObject?>(null) }
-    val readOnly = detail.thread.control == "readOnly"
+    val readOnly = !detail.thread.canContinueOriginal
     val activeItems =
         detail.items.filter { detail.activeTurn != null && it.turnId == detail.activeTurn }
     val retrying = activeItems.any { it.kind == "retry" }
@@ -287,97 +401,110 @@ fun WorkbenchDetailPage(
             submittedId = null
         }
     }
+    val canSend =
+        canControl &&
+            !readOnly &&
+            draft.isNotBlank() &&
+            !state.workbench.loading &&
+            state.uncertainCommand == null
+    val send = {
+        if (canSend) {
+            submitted = draft
+            submittedId = UUID.randomUUID().toString()
+            actions.workbenchAction(
+                if (detail.activeTurn == null) "send" else "steer",
+                buildJsonObject {
+                    put("threadId", detail.thread.id)
+                    put("text", draft)
+                    put("messageId", submittedId)
+                    detail.activeTurn?.let { put("turnId", it) }
+                },
+            )
+        }
+    }
     Column(Modifier.fillMaxSize().imePadding()) {
-        Column(
-            Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(
+                onClick = { continuation = true },
+                contentPadding = PaddingValues(horizontal = 0.dp),
+                modifier = Modifier.testTag("session-mode"),
+            ) {
                 Text(
-                    detail.thread.title,
-                    Modifier.weight(1f),
-                    style = MaterialTheme.typography.titleLarge,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Box {
-                    IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, "会话操作") }
-                    DropdownMenu(menu, { menu = false }) {
-                        DropdownMenuItem(
-                            text = { Text("创建上下文分支") },
-                            enabled = canControl,
-                            onClick = {
-                                menu = false
-                                confirm(
-                                    ConfirmAction("创建分支继续开发", "从已有上下文创建一个可控制的新会话。") {
-                                        actions.workbenchAction(
-                                            "fork",
-                                            buildJsonObject { put("threadId", detail.thread.id) },
-                                        )
-                                    }
-                                )
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("重命名") },
-                            enabled = canControl && !readOnly,
-                            onClick = {
-                                menu = false
-                                rename = true
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("归档会话") },
-                            enabled = canControl && !readOnly && detail.activeTurn == null,
-                            onClick = {
-                                menu = false
-                                confirm(
-                                    ConfirmAction("归档此会话", "会话将移至已归档列表，历史记录仍然保留。") {
-                                        actions.workbenchAction(
-                                            "archive",
-                                            buildJsonObject { put("threadId", detail.thread.id) },
-                                        )
-                                    }
-                                )
-                            },
-                        )
-                    }
-                }
-            }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    detail.thread.project,
-                    Modifier.weight(1f),
+                    if (readOnly) "选择继续方式" else "沿用原会话",
                     style = MaterialTheme.typography.labelMedium,
                 )
-                StatusLabel(statusTitle(activityStatus), detail.activeTurn != null)
-                IconButton(onClick = { actions.openThread(detail.thread.id) }) {
-                    Icon(Icons.Outlined.Refresh, "刷新当前会话")
+                Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(18.dp))
+            }
+            Spacer(Modifier.weight(1f))
+            Text(
+                statusTitle(activityStatus),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Box {
+                IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreHoriz, "会话操作") }
+                DropdownMenu(menu, { menu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("选择继续方式") },
+                        onClick = {
+                            menu = false
+                            continuation = true
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("刷新会话") },
+                        onClick = {
+                            menu = false
+                            actions.openThread(detail.thread.id)
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("重命名") },
+                        enabled = canControl && !readOnly,
+                        onClick = {
+                            menu = false
+                            rename = true
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("归档会话") },
+                        enabled = canControl && !readOnly && detail.activeTurn == null,
+                        onClick = {
+                            menu = false
+                            confirm(
+                                ConfirmAction("归档此会话", "会话将移至已归档列表，历史记录仍然保留。") {
+                                    actions.workbenchAction(
+                                        "archive",
+                                        buildJsonObject { put("threadId", detail.thread.id) },
+                                    )
+                                }
+                            )
+                        },
+                    )
                 }
             }
         }
-        if (readOnly) Banner("当前会话仅查看。创建分支可保留已有上下文，并在工作台继续开发。")
         if (approvals.isNotEmpty())
             FilledTonalButton(
                 onClick = { selectedApproval = approvals.first() },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
             ) {
-                Icon(Icons.Outlined.PendingActions, null)
+                Icon(Icons.Outlined.PendingActions, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("${approvals.size} 项等待你确认")
             }
         state.workbench.error?.let { Banner(it, true) }
         state.adminError?.let { Banner(it, true) }
-        PrimaryTabRow(tab) {
-            listOf("对话", "执行", "变更").forEachIndexed { index, title ->
-                Tab(
-                    tab == index,
-                    { tab = index },
-                    text = { Text(title) },
-                    modifier = Modifier.testTag("thread-tab-$index"),
-                )
-            }
-        }
+        SegmentedBar(
+            listOf("对话", "执行", "变更"),
+            tab,
+            { tab = it },
+            Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+            "thread-tab",
+        )
         val visible =
             detail.items.filter { item ->
                 when (tab) {
@@ -417,8 +544,8 @@ fun WorkbenchDetailPage(
         LazyColumn(
             Modifier.weight(1f).fillMaxWidth().testTag("thread-timeline"),
             state = scroll,
-            contentPadding = PaddingValues(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
             if (detail.nextCursor != null)
                 item {
@@ -440,11 +567,11 @@ fun WorkbenchDetailPage(
                             else -> Icons.Outlined.Difference
                         },
                         when (tab) {
-                            0 -> "开始对话"
+                            0 -> "有什么想完成的？"
                             1 -> "暂无执行记录"
                             else -> "暂无文件变更"
                         },
-                        if (tab == 0) "描述你希望在这个项目中完成的任务。" else "任务执行后的记录会实时显示。",
+                        if (tab == 0) "从这里开始，和电脑上的 Codex 一起开发。" else "任务执行后的记录会实时显示。",
                     )
                 }
             items(visible, key = { it.id }) { MessageItem(it) }
@@ -461,113 +588,148 @@ fun WorkbenchDetailPage(
                     )
                 }
         }
-        if (readOnly)
-            OutlinedButton(
-                onClick = {
-                    confirm(
-                        ConfirmAction("创建分支继续开发", "将从此会话的已有上下文创建一个可控制的新会话，原会话保持独立。") {
-                            actions.workbenchAction(
-                                "fork",
-                                buildJsonObject { put("threadId", detail.thread.id) },
-                            )
-                        }
-                    )
-                },
-                enabled = canControl,
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
+        if (readOnly) {
+            Column(
+                Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Icon(Icons.Outlined.ForkRight, null)
-                Spacer(Modifier.width(8.dp))
-                Text("创建分支继续")
-            }
-        else
-            Surface(color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 0.dp) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (detail.activeTurn != null)
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                when {
-                                    retrying -> "连接重试中，任务仍在继续"
-                                    compacting -> "正在整理上下文，随后处理消息"
-                                    else -> "正在执行，可补充要求"
-                                },
-                                Modifier.weight(1f),
-                                style = MaterialTheme.typography.labelMedium,
-                            )
-                            TextButton(
-                                onClick = {
-                                    val turn = detail.activeTurn
-                                    confirm(
-                                        ConfirmAction("中断开发任务", "请求 Codex 停止当前轮次，已完成的文件修改会保留。") {
-                                            actions.workbenchAction(
-                                                "interrupt",
-                                                buildJsonObject {
-                                                    put("threadId", detail.thread.id)
-                                                    put("turnId", turn)
-                                                },
-                                            )
-                                        }
-                                    )
-                                },
-                                enabled = canControl,
-                            ) {
-                                Icon(Icons.Outlined.StopCircle, null, Modifier.size(18.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("停止")
-                            }
-                        }
-                    Row(
-                        verticalAlignment = Alignment.Bottom,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        OutlinedTextField(
-                            draft,
-                            { if (it.toByteArray().size <= 64 * 1024) draft = it },
-                            placeholder = {
-                                Text(
-                                    if (detail.activeTurn == null) "告诉 Codex 接下来做什么…" else "补充开发要求…"
-                                )
-                            },
-                            modifier = Modifier.weight(1f).testTag("message-input"),
-                            maxLines = 6,
-                            shape = MaterialTheme.shapes.large,
-                        )
-                        FilledIconButton(
-                            onClick = {
-                                submitted = draft
-                                submittedId = UUID.randomUUID().toString()
-                                actions.workbenchAction(
-                                    if (detail.activeTurn == null) "send" else "steer",
-                                    buildJsonObject {
-                                        put("threadId", detail.thread.id)
-                                        put("text", draft)
-                                        put("messageId", submittedId)
-                                        detail.activeTurn?.let { put("turnId", it) }
-                                    },
-                                )
-                            },
-                            enabled =
-                                canControl &&
-                                    draft.isNotBlank() &&
-                                    !state.workbench.loading &&
-                                    state.uncertainCommand == null,
-                            modifier = Modifier.size(52.dp).testTag("send-message"),
-                        ) {
-                            Icon(Icons.AutoMirrored.Outlined.Send, "发送指令")
-                        }
-                    }
-                    Text(
-                        if (state.workbench.streaming) "实时同步 · 执行位置：${detail.thread.project}"
-                        else "正在恢复实时连接，任务继续在 PC 执行",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                Text(
+                    "正在查看历史记录",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Button(
+                    onClick = { continuation = true },
+                    modifier =
+                        Modifier.fillMaxWidth().heightIn(min = 50.dp).testTag("choose-session-mode"),
+                ) {
+                    Text("选择继续方式")
                 }
             }
+        } else {
+            Column(
+                Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (detail.activeTurn != null)
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            when {
+                                retrying -> "连接重试中，任务仍在继续"
+                                compacting -> "正在整理上下文，随后处理消息"
+                                else -> "正在执行，可补充要求"
+                            },
+                            Modifier.weight(1f),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        TextButton(
+                            onClick = {
+                                confirm(
+                                    ConfirmAction("中断开发任务", "请求 Codex 停止当前轮次，已完成的文件修改会保留。") {
+                                        actions.workbenchAction(
+                                            "interrupt",
+                                            buildJsonObject {
+                                                put("threadId", detail.thread.id)
+                                                put("turnId", detail.activeTurn)
+                                            },
+                                        )
+                                    }
+                                )
+                            },
+                            enabled = canControl,
+                        ) {
+                            Icon(Icons.Outlined.StopCircle, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("停止")
+                        }
+                    }
+                Surface(
+                    shape = MaterialTheme.shapes.extraLarge,
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    shadowElevation = 2.dp,
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .padding(start = 18.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Box(
+                            Modifier.weight(1f).heightIn(min = 42.dp).padding(vertical = 9.dp),
+                            contentAlignment = Alignment.CenterStart,
+                        ) {
+                            BasicTextField(
+                                draft,
+                                { if (it.toByteArray().size <= 64 * 1024) draft = it },
+                                Modifier.fillMaxWidth().testTag("message-input"),
+                                textStyle =
+                                    MaterialTheme.typography.bodyLarge.copy(
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    ),
+                                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                maxLines = 6,
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
+                                keyboardActions = KeyboardActions(onSend = { send() }),
+                                decorationBox = { inner ->
+                                    if (draft.isEmpty())
+                                        Text(
+                                            if (detail.activeTurn == null) "向 Codex 发送消息…"
+                                            else "补充开发要求…",
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    inner()
+                                },
+                            )
+                        }
+                        FilledIconButton(
+                            onClick = send,
+                            enabled = canSend,
+                            shape = CircleShape,
+                            modifier = Modifier.size(44.dp).testTag("send-message"),
+                        ) {
+                            Icon(Icons.Outlined.ArrowUpward, "发送指令", Modifier.size(22.dp))
+                        }
+                    }
+                }
+                Text(
+                    if (state.workbench.streaming) "在 PC 上执行 · 实时同步" else "正在恢复实时连接，任务继续在 PC 执行",
+                    Modifier.align(Alignment.CenterHorizontally).padding(top = 4.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
+    if (continuation)
+        SessionChoiceSheet(
+            detail.thread,
+            canControl,
+            { continuation = false },
+            original = {
+                continuation = false
+                actions.workbenchAction(
+                    "attach",
+                    buildJsonObject { put("threadId", detail.thread.id) },
+                )
+            },
+            branch = {
+                continuation = false
+                actions.workbenchAction(
+                    "fork",
+                    buildJsonObject { put("threadId", detail.thread.id) },
+                )
+            },
+            connectionSettings = {
+                continuation = false
+                settings()
+            },
+        )
     selectedApproval?.let { request ->
         ApprovalDialog(request, canControl, { selectedApproval = null }) { answer ->
             actions.workbenchAction(
@@ -582,73 +744,93 @@ fun WorkbenchDetailPage(
         }
     }
     if (rename) {
-        var name by remember { mutableStateOf(detail.thread.title) }
-        AlertDialog(
-            onDismissRequest = { rename = false },
-            title = { Text("重命名会话") },
-            text = {
-                OutlinedTextField(
-                    name,
-                    { if (it.toByteArray().size <= 256) name = it },
-                    label = { Text("会话名称") },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        actions.workbenchAction(
-                            "rename",
-                            buildJsonObject {
-                                put("threadId", detail.thread.id)
-                                put("name", name.trim())
-                            },
-                        )
-                        rename = false
+        var name by rememberSaveable { mutableStateOf(detail.thread.title) }
+        EditorSheet(
+            "重命名会话",
+            { rename = false },
+            save = {
+                actions.workbenchAction(
+                    "rename",
+                    buildJsonObject {
+                        put("threadId", detail.thread.id)
+                        put("name", name.trim())
                     },
-                    enabled = canControl && name.isNotBlank(),
-                ) {
-                    Text("保存")
-                }
+                )
+                rename = false
             },
-            dismissButton = { TextButton(onClick = { rename = false }) { Text("取消") } },
-        )
+            saveEnabled = canControl && name.isNotBlank(),
+        ) {
+            OutlinedTextField(
+                name,
+                { if (it.toByteArray().size <= 256) name = it },
+                label = { Text("会话名称") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
     }
 }
 
 @Composable
 private fun ModelPicker(value: String, models: List<JsonObject>, changed: (String) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        OutlinedTextField(
-            value,
-            changed,
-            label = { Text("模型（留空使用 PC 默认值）") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            trailingIcon = {
-                IconButton(onClick = { expanded = true }) {
-                    Icon(Icons.Outlined.ExpandMore, "选择 Codex 模型")
-                }
-            },
-        )
-        DropdownMenu(expanded, { expanded = false }, Modifier.heightIn(max = 300.dp)) {
-            DropdownMenuItem(
-                text = { Text("PC 默认模型") },
-                onClick = {
-                    changed("")
-                    expanded = false
-                },
-            )
-            models.forEach { model ->
-                DropdownMenuItem(
-                    text = { Text(model["displayName"].text(model["model"].text())) },
+    val choices =
+        listOf("" to "PC 默认模型") +
+            models.map { it["model"].text() to it["displayName"].text(it["model"].text()) }
+    var open by remember { mutableStateOf(false) }
+    var custom by remember { mutableStateOf(false) }
+    SettingRow("模型", choices.find { it.first == value }?.second ?: value, onClick = { open = true })
+    if (open)
+        EditorSheet("选择模型", { open = false }) {
+            SettingsGroup {
+                choices
+                    .distinctBy { it.first }
+                    .forEachIndexed { index, (id, label) ->
+                        if (index > 0) SettingDivider()
+                        SettingRow(
+                            label,
+                            onClick = {
+                                changed(id)
+                                open = false
+                            },
+                            trailing = {
+                                if (value == id)
+                                    Icon(Icons.Outlined.Check, "已选择", Modifier.size(20.dp))
+                            },
+                        )
+                    }
+                SettingDivider()
+                SettingRow(
+                    "自定义模型",
+                    icon = Icons.Outlined.Edit,
                     onClick = {
-                        changed(model["model"].text())
-                        expanded = false
+                        open = false
+                        custom = true
                     },
                 )
             }
+        }
+    if (custom) {
+        var draft by rememberSaveable { mutableStateOf(value) }
+        EditorSheet(
+            "自定义模型",
+            { custom = false },
+            save = {
+                changed(draft.trim())
+                custom = false
+            },
+            saveEnabled = draft.isNotBlank(),
+        ) {
+            OutlinedTextField(
+                draft,
+                { draft = it },
+                Modifier.fillMaxWidth(),
+                label = { Text("模型名称") },
+                singleLine = true,
+            )
+            Text(
+                "模型需要能通过电脑当前配置的供应商使用。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -656,38 +838,98 @@ private fun ModelPicker(value: String, models: List<JsonObject>, changed: (Strin
 @Composable
 fun MessageItem(item: WorkItem) {
     var expanded by rememberSaveable(item.id) { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    val user = item.kind == "userMessage"
+    val agent = item.kind == "agentMessage"
     val code = item.kind in listOf("commandExecution", "fileChange")
-    Surface(
-        shape = MaterialTheme.shapes.large,
-        color =
-            if (item.kind == "userMessage") MaterialTheme.colorScheme.secondaryContainer
-            else MaterialTheme.colorScheme.surfaceContainerLow,
-        modifier = Modifier.fillMaxWidth().animateContentSize(),
-    ) {
-        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(Modifier.fillMaxWidth()) {
-                Text(
-                    item.title,
-                    Modifier.weight(1f),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
+    val content = if (expanded) item.text else item.text.take(8000)
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        Column(
+            Modifier.then(
+                    if (user) Modifier.widthIn(max = maxWidth * 0.88f).align(Alignment.CenterEnd)
+                    else Modifier.fillMaxWidth()
                 )
-                if (item.status.isNotBlank())
-                    Text(statusTitle(item.status), style = MaterialTheme.typography.labelSmall)
-            }
-            val content = if (expanded) item.text else item.text.take(8000)
-            if (item.kind == "agentMessage") MarkdownReply(content)
-            else
-                SelectionContainer {
-                    Text(
-                        content,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontFamily = if (code) FontFamily.Monospace else FontFamily.Default,
-                    )
+                .animateContentSize(),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (agent)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(17.dp))
+                    Text(item.title, style = MaterialTheme.typography.labelMedium)
                 }
-            if (item.text.length > 8000)
-                TextButton(onClick = { expanded = !expanded }) {
-                    Text(if (expanded) "收起" else "展开完整内容")
+            Surface(
+                shape = MaterialTheme.shapes.medium,
+                color =
+                    when {
+                        user -> MaterialTheme.colorScheme.surfaceContainer
+                        agent -> Color.Transparent
+                        item.kind == "error" -> MaterialTheme.colorScheme.errorContainer
+                        else -> MaterialTheme.colorScheme.surfaceContainerLow
+                    },
+            ) {
+                Column(
+                    Modifier.then(
+                        if (agent) Modifier.padding(top = 5.dp) else Modifier.padding(16.dp)
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (!user && !agent)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                if (code) Icons.Outlined.Terminal else Icons.Outlined.Info,
+                                null,
+                                Modifier.size(16.dp),
+                            )
+                            Text(
+                                item.title,
+                                Modifier.weight(1f).padding(start = 8.dp),
+                                style = MaterialTheme.typography.labelMedium,
+                            )
+                            if (item.status.isNotBlank())
+                                Text(
+                                    statusTitle(item.status),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                        }
+                    if (agent) MarkdownReply(content)
+                    else
+                        SelectionContainer {
+                            Text(
+                                content,
+                                style =
+                                    if (code) MaterialTheme.typography.bodySmall
+                                    else MaterialTheme.typography.bodyLarge,
+                                fontFamily = if (code) FontFamily.Monospace else FontFamily.Default,
+                            )
+                        }
+                    if (item.text.length > 8000)
+                        TextButton(onClick = { expanded = !expanded }) {
+                            Text(if (expanded) "收起" else "展开完整内容")
+                        }
+                }
+            }
+            if (user && item.status.isNotBlank())
+                Text(
+                    statusTitle(item.status),
+                    Modifier.align(Alignment.End).padding(end = 4.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            if (agent)
+                IconButton(
+                    onClick = { clipboard.setText(AnnotatedString(item.text)) },
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(
+                        Icons.Outlined.ContentCopy,
+                        "复制回复",
+                        Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
         }
     }
@@ -826,46 +1068,59 @@ fun WorkbenchSettingsPage(state: CompanionState, enabled: Boolean, actions: Laun
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
-        item { Banner("默认自动连接共享后台；无法共享时管理独立会话。切换设置前需先结束工作台中的运行任务。") }
         item {
-            Panel {
-                Text("连接方式", style = MaterialTheme.typography.titleMedium)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("auto" to "自动", "shared" to "共享后台", "managed" to "独立后台").forEach {
-                        (id, title) ->
-                        FilterChip(
-                            draft["connectionMode"].text() == id,
-                            { field("connectionMode", id) },
-                            label = { Text(title) },
-                        )
-                    }
+            Text("连接你的开发会话", style = MaterialTheme.typography.headlineMedium)
+            Text(
+                "共享后台可以接入其中已加载的原会话。独立后台用于新建和分支会话。",
+                Modifier.padding(top = 8.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        item {
+            SettingsGroup("连接", footer = "自动模式优先连接共享后台；不可用时使用独立后台。") {
+                ChoiceSetting(
+                    "连接方式",
+                    draft["connectionMode"].text(),
+                    listOf("auto" to "自动", "shared" to "共享后台", "managed" to "独立后台"),
+                ) {
+                    field("connectionMode", it)
+                }
+                SettingDivider()
+                TextSetting("默认项目", draft["workDir"].text(), "输入 PC 项目路径", tag = "workDir") {
+                    field("workDir", it)
                 }
             }
         }
-        listOf(
-                "workDir" to "默认 PC 项目路径",
-                "codexHome" to "CODEX_HOME（留空继承 PC 环境）",
-                "executable" to "Codex 可执行文件（留空自动查找）",
-                "socketPath" to "共享 Socket（留空自动发现）",
-            )
-            .forEach { (key, title) ->
-                item {
-                    OutlinedTextField(
-                        draft[key].text(),
-                        { field(key, it) },
-                        label = { Text(title) },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+        item {
+            SettingsGroup("高级选项", footer = "切换连接设置前，需要先结束工作台正在运行的任务。") {
+                TextSetting(
+                    "Codex 配置目录",
+                    draft["codexHome"].text(),
+                    "继承 PC 环境",
+                    subtitle = "CODEX_HOME",
+                    tag = "codexHome",
+                ) {
+                    field("codexHome", it)
+                }
+                SettingDivider()
+                TextSetting("Codex 程序", draft["executable"].text(), "自动查找", tag = "executable") {
+                    field("executable", it)
+                }
+                SettingDivider()
+                TextSetting("共享 Socket", draft["socketPath"].text(), "自动发现", tag = "socketPath") {
+                    field("socketPath", it)
                 }
             }
+        }
         state.adminError?.let { item { Banner(it, true) } }
         item {
             Button(
                 onClick = { actions.workbenchAction("configure", draft) },
-                enabled = enabled,
-                modifier = Modifier.fillMaxWidth(),
+                enabled = enabled && draft != settings,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
             ) {
                 Text("保存并重新连接")
             }

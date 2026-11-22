@@ -136,6 +136,11 @@ class WorkbenchLifecycleTest {
                             put("thread", buildJsonObject { put("id", "created-fixture") })
                         if (request.action == "workbench.fork")
                             put("thread", buildJsonObject { put("id", "fork-fixture") })
+                        if (request.action == "workbench.attach")
+                            put(
+                                "thread",
+                                buildJsonObject { put("id", request.input["threadId"]!!) },
+                            )
                         if (request.action == "workbench.send")
                             put("turn", buildJsonObject { put("id", "turn-fixture") })
                         if (request.action == "workbench.steer") put("turnId", "turn-fixture")
@@ -223,6 +228,17 @@ class WorkbenchLifecycleTest {
     }
 
     private fun json(value: String) = WireJson.parseToJsonElement(value).obj()
+
+    @Test
+    fun attachingFromTheSidebarOpensTheRequestedOriginalWithoutForking() {
+        val api = FakeApi()
+        val model = model(api)
+        model.openThread("previous")
+        model.workbenchAction("attach", buildJsonObject { put("threadId", "desktop-original") })
+        assertEquals("desktop-original", model.state.value.workbench.detail?.thread?.id)
+        assertEquals("workbench.attach", api.requests.single().action)
+        assertEquals("desktop-original", api.requests.single().input["threadId"].text())
+    }
 
     @Test
     fun forkMessageIsVisibleDuringCompactionBeforeItsCommandReplyAndAfterReopening() = runBlocking {

@@ -1,21 +1,21 @@
 # Launcher Mobile
 
-A native Android control center for a paired development PC, built with Kotlin, Jetpack Compose, and Material 3. Requires Android 8.0 or later.
+A native Android control center for a paired development PC, built with Kotlin and Jetpack Compose. Requires Android 8.0 or later.
 
-The original Launcher icon is retained. The interface supports light and dark themes, animated navigation, large text, and live updates.
+The original Launcher icon is retained. The interface uses a neutral iOS-inspired theme, a searchable conversation sidebar, grouped settings, and a floating composer. Light/dark themes, native animations, large text, and live updates are supported.
 
 <p>
-  <img src="docs/screenshots/monitor-dark.png" width="220" alt="Overview in dark theme" />
-  <img src="docs/screenshots/workbench-chat-dark.png" width="220" alt="Live development conversation" />
-  <img src="docs/screenshots/configuration-light.png" width="220" alt="PC configuration editor in light theme" />
+  <img src="docs/screenshots/sidebar-light.png" width="220" alt="Searchable conversation sidebar" />
+  <img src="docs/screenshots/workbench-chat-light.png" width="220" alt="Live development conversation" />
+  <img src="docs/screenshots/configuration-fields-light.png" width="220" alt="Grouped PC configuration editor" />
 </p>
 
-Screenshots are rendered from the native Compose UI using synthetic test data.
+Screenshots are rendered from the native Compose UI using synthetic test data. See the [interface guide](docs/interface.md) for navigation, continuation rules, and configuration behavior.
 
 ## Features
 
 - **Overview:** PC connectivity, ANY acquisition and keep-alive status, pending approvals, and recent sessions.
-- **Workbench:** project/session browsing, AI replies, command output, file changes, follow-up messages, steering, interruption, and supported Codex approvals.
+- **Workbench:** a searchable sidebar, original-session or branch selection, separate unsent drafts, AI replies, command output, file changes, follow-up messages, steering, interruption, and supported Codex approvals.
 - **Run:** start/stop, immediate keep-alive controls, request/response details, searchable logs, and revision-checked PC configuration.
 - **Settings:** providers, usage, billing, Windows scheduled tasks, maintenance jobs, credentials, workbench connections, appearance, and verified APK updates.
 
@@ -39,6 +39,7 @@ The desktop gateway uses the official Codex App Server protocol. It attempts a s
 - Managed sessions support bidirectional control.
 - Sessions loaded by an accessible shared backend can be attached.
 - Reading an independently running Desktop/CLI session's history does not imply live control. These sessions are marked read-only and can be branched into a new managed session.
+- The continuation sheet always exposes both choices. Original-session control stays disabled with an explanation when the gateway cannot attach; it is never silently replaced with a fork.
 - CODEX_HOME, the executable, project path, and shared socket are configurable.
 - An old session may require restoring its original provider before it can continue.
 

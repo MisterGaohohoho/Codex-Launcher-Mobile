@@ -66,54 +66,36 @@ fun UsagePage(
     ) {
         item { AdminRefresh(state, refresh) }
         item {
-            Panel {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(0 to "全部", 1 to "24 小时", 7 to "7 天", 30 to "30 天").forEach {
-                        (count, label) ->
-                        FilterChip(
-                            days == count,
-                            {
-                                days = count
-                                offset = 0
-                                actions.adminQuery("usage", filter(0))
-                            },
-                            label = { Text(label) },
-                        )
-                    }
+            SettingsGroup("筛选请求") {
+                ChoiceSetting(
+                    "时间范围",
+                    days.toString(),
+                    listOf("0" to "全部时间", "1" to "24 小时", "7" to "7 天", "30" to "30 天"),
+                ) {
+                    days = it.toInt()
+                    offset = 0
+                    actions.adminQuery("usage", filter(0))
                 }
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf("" to "全部应用", "codex" to "Codex", "claude" to "Claude").forEach {
-                        (id, label) ->
-                        FilterChip(
-                            app == id,
-                            {
-                                app = id
-                                offset = 0
-                                actions.adminQuery("usage", filter(0))
-                            },
-                            label = { Text(label) },
-                        )
-                    }
+                SettingDivider()
+                ChoiceSetting(
+                    "应用",
+                    app,
+                    listOf("" to "全部应用", "codex" to "Codex", "claude" to "Claude"),
+                ) {
+                    app = it
+                    offset = 0
+                    actions.adminQuery("usage", filter(0))
                 }
-                OutlinedTextField(
-                    model,
-                    { model = it },
-                    label = { Text("筛选模型（留空为全部）") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                )
-                OutlinedTextField(
-                    provider,
-                    { provider = it },
-                    label = { Text("筛选供应商（留空为全部）") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                )
+                SettingDivider()
+                TextSetting("模型", model, "全部模型", tag = "usage-model") { model = it }
+                SettingDivider()
+                TextSetting("供应商", provider, "全部供应商", tag = "usage-provider") { provider = it }
                 TextButton(
                     onClick = {
                         offset = 0
                         actions.adminQuery("usage", filter(0))
-                    }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("应用筛选")
                 }
@@ -306,9 +288,8 @@ fun MaintenancePage(
                 handledOutcome = it.requestId
             }
     }
-    val activeJob = jobs.any {
-        it.obj()["state"].text() in listOf("running", "pausing", "cancelling")
-    }
+    val activeJob =
+        jobs.any { it.obj()["state"].text() in listOf("running", "pausing", "cancelling") }
     val currentRefresh by rememberUpdatedState(refresh)
     LaunchedEffect(activeJob, state.online, state.busy) {
         if (activeJob && state.online && !state.busy)
@@ -446,22 +427,10 @@ fun MaintenancePage(
             SectionTitle("会话历史", "筛选 ${page["matched"].text("0")} 条，共 ${page["total"].text("0")} 条")
         }
         item {
-            OutlinedTextField(
-                search,
-                { search = it.take(1024) },
-                label = { Text("搜索标题、项目或模型") },
-                modifier = Modifier.fillMaxWidth(),
-                trailingIcon = {
-                    IconButton(
-                        onClick = {
-                            offset = 0
-                            refresh()
-                        }
-                    ) {
-                        Icon(Icons.Outlined.Search, "搜索历史")
-                    }
-                },
-            )
+            SearchField(search, { search = it.take(1024) }, "搜索标题、项目或模型") {
+                offset = 0
+                refresh()
+            }
         }
         item {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

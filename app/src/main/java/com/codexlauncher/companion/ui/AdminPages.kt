@@ -17,6 +17,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.codexlauncher.companion.*
@@ -32,77 +33,120 @@ fun SettingsPage(
     pair: () -> Unit,
     confirm: (ConfirmAction) -> Unit,
 ) {
+    var computer by remember { mutableStateOf(false) }
     LazyColumn(
-        Modifier.fillMaxSize(),
+        Modifier.fillMaxSize().testTag("settings-list"),
         contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
+        verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
         item {
-            Panel {
-                SectionTitle("已连接的电脑")
-                KeyValue("名称", state.computer?.computerName.orEmpty())
-                KeyValue("地址", state.computer?.endpoint.orEmpty())
-                KeyValue("权限", if (state.computer?.canControl == true) "完整管理" else "仅查看")
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = pair, enabled = !state.busy) { Text("重新配对") }
-                    TextButton(
-                        onClick = {
-                            confirm(
-                                ConfirmAction("移除此电脑", "移除手机保存的授权。重新连接时需要扫描 PC 上的配对码。") {
-                                    actions.forget()
-                                }
-                            )
-                        },
-                        enabled = !state.busy,
-                    ) {
-                        Text("移除连接")
-                    }
+            SettingsGroup {
+                SettingRow(
+                    state.computer?.computerName.orEmpty(),
+                    if (state.computer?.canControl == true) "完整管理" else "仅查看",
+                    "已配对的开发电脑",
+                    Icons.Outlined.Computer,
+                    onClick = { computer = true },
+                )
+            }
+        }
+        item {
+            SettingsGroup("电脑与工作台") {
+                val links =
+                    listOf(
+                        Triple("configuration", "完整运行配置", Icons.Outlined.Tune),
+                        Triple("providers", "供应商与模型", Icons.Outlined.Dns),
+                        Triple(
+                            "workbench-settings",
+                            "Codex 工作台连接",
+                            Icons.Outlined.SettingsEthernet,
+                        ),
+                        Triple("credentials", "凭据管理", Icons.Outlined.Key),
+                    )
+                links.forEachIndexed { index, (id, label, icon) ->
+                    if (index > 0) SettingDivider(50)
+                    SettingRow(
+                        label,
+                        icon = icon,
+                        enabled = state.computer?.canControl == true,
+                        onClick = { navigate(id) },
+                    )
                 }
             }
         }
         item {
-            Panel {
-                SectionTitle("外观")
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("system" to "跟随系统", "light" to "浅色", "dark" to "深色").forEach { (id, name)
-                        ->
-                        FilterChip(state.theme == id, { actions.theme(id) }, label = { Text(name) })
-                    }
+            SettingsGroup("记录与自动化") {
+                val links =
+                    listOf(
+                        Triple("usage", "用量与请求记录", Icons.Outlined.BarChart),
+                        Triple("billing", "单价与计费规则", Icons.Outlined.ReceiptLong),
+                        Triple("schedule", "Windows 计划任务", Icons.Outlined.Schedule),
+                        Triple("maintenance", "会话历史与维护", Icons.Outlined.Inventory2),
+                    )
+                links.forEachIndexed { index, (id, label, icon) ->
+                    if (index > 0) SettingDivider(50)
+                    SettingRow(
+                        label,
+                        icon = icon,
+                        enabled = state.computer?.canControl == true,
+                        onClick = { navigate(id) },
+                    )
                 }
             }
         }
-        item { SectionTitle("PC 管理") }
-        listOf(
-                "configuration" to "完整运行配置",
-                "providers" to "供应商与模型",
-                "usage" to "用量与请求记录",
-                "billing" to "单价与计费规则",
-                "schedule" to "Windows 计划任务",
-                "maintenance" to "会话历史与维护",
-                "credentials" to "凭据管理",
-                "workbench-settings" to "Codex 工作台连接",
-            )
-            .forEach { (id, label) ->
-                item {
-                    FilledTonalButton(
-                        onClick = { navigate(id) },
-                        enabled = state.computer?.canControl == true,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
-                    ) {
-                        Text(label, Modifier.weight(1f))
-                        Icon(Icons.Outlined.ChevronRight, null)
-                    }
-                }
+        item {
+            SettingsGroup("应用") {
+                ChoiceSetting(
+                    "外观",
+                    state.theme,
+                    listOf("system" to "跟随系统", "light" to "浅色", "dark" to "深色"),
+                    changed = actions.theme,
+                )
+                SettingDivider()
+                SettingRow("应用更新", BuildConfig.VERSION_NAME, onClick = { navigate("updates") })
             }
-        item { UpdatePanel(state.update, actions) }
+        }
         item {
             Text(
-                "Launcher ${BuildConfig.VERSION_NAME} · Android 原生工作台",
+                "Launcher · 你的移动工作台",
+                Modifier.fillMaxWidth(),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
+    if (computer)
+        EditorSheet("已连接的电脑", { computer = false }) {
+            SettingsGroup {
+                SettingRow("名称", state.computer?.computerName)
+                SettingDivider()
+                SettingRow("地址", subtitle = state.computer?.endpoint)
+                SettingDivider()
+                SettingRow("权限", if (state.computer?.canControl == true) "完整管理" else "仅查看")
+            }
+            Button(
+                onClick = {
+                    computer = false
+                    pair()
+                },
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("重新配对")
+            }
+            TextButton(
+                onClick = {
+                    computer = false
+                    confirm(
+                        ConfirmAction("移除此电脑", "移除手机保存的授权。重新连接时需要扫描 PC 上的配对码。") { actions.forget() }
+                    )
+                },
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("移除连接", color = MaterialTheme.colorScheme.error)
+            }
+        }
 }
 
 internal fun managerInput(operation: String, input: JsonObject = JsonObject(emptyMap())) =
@@ -183,11 +227,102 @@ fun AdminPage(
                     val row = value.obj()
                     val id = row["id"].text()
                     val input = buildJsonObject { put("id", id) }
+                    var more by remember { mutableStateOf(false) }
                     Panel {
-                        SectionTitle(row["providerName"].text())
-                        Text(row["baseUrl"].text(), style = MaterialTheme.typography.bodySmall)
-                        KeyValue("模型", row["model"].text())
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(
+                                Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(5.dp),
+                            ) {
+                                Text(
+                                    row["providerName"].text(),
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                                Text(
+                                    row["model"].text(),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Box {
+                                IconButton(onClick = { more = true }) {
+                                    Icon(Icons.Outlined.MoreHoriz, "供应商操作")
+                                }
+                                DropdownMenu(more, { more = false }) {
+                                    DropdownMenuItem(
+                                        text = { Text("测试连接") },
+                                        enabled = enabled && !state.adminLoading,
+                                        onClick = {
+                                            more = false
+                                            inspect("连接测试", "providers.test", input)
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("模型列表") },
+                                        enabled = enabled && !state.adminLoading,
+                                        onClick = {
+                                            more = false
+                                            inspect("可用模型", "providers.models", input)
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("查询余额") },
+                                        enabled = enabled && !state.adminLoading,
+                                        onClick = {
+                                            more = false
+                                            inspect(
+                                                "供应商余额",
+                                                "providers.balance",
+                                                buildJsonObject {
+                                                    put("id", id)
+                                                    put("source", "local")
+                                                },
+                                            )
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("复制配置") },
+                                        enabled = enabled,
+                                        onClick = {
+                                            more = false
+                                            actions.adminCommand(
+                                                "manager",
+                                                managerInput("providers.duplicate", input),
+                                            )
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text("删除供应商", color = MaterialTheme.colorScheme.error)
+                                        },
+                                        enabled = enabled,
+                                        onClick = {
+                                            more = false
+                                            confirm(
+                                                ConfirmAction(
+                                                    "删除供应商",
+                                                    "删除 ${row["providerName"].text()} 的已保存配置。",
+                                                ) {
+                                                    actions.adminCommand(
+                                                        "manager",
+                                                        managerInput("providers.delete", input),
+                                                    )
+                                                }
+                                            )
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                        Text(
+                            row["baseUrl"].text(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             Button(
                                 onClick = {
                                     confirm(
@@ -206,69 +341,11 @@ fun AdminPage(
                             ) {
                                 Text(if (data["activeProviderId"].text() == id) "当前使用" else "启用")
                             }
-                            OutlinedButton(
+                            TextButton(
                                 onClick = { inspect("编辑供应商", "providers.detail", input) },
                                 enabled = enabled,
                             ) {
-                                Text("编辑")
-                            }
-                            TextButton(
-                                onClick = {
-                                    confirm(
-                                        ConfirmAction(
-                                            "删除供应商",
-                                            "删除 ${row["providerName"].text()} 的已保存配置。",
-                                        ) {
-                                            actions.adminCommand(
-                                                "manager",
-                                                managerInput("providers.delete", input),
-                                            )
-                                        }
-                                    )
-                                },
-                                enabled = enabled,
-                            ) {
-                                Text("删除")
-                            }
-                        }
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton(
-                                onClick = { inspect("连接测试", "providers.test", input) },
-                                enabled = enabled && !state.adminLoading,
-                            ) {
-                                Text("测试连接")
-                            }
-                            TextButton(
-                                onClick = { inspect("可用模型", "providers.models", input) },
-                                enabled = enabled && !state.adminLoading,
-                            ) {
-                                Text("模型列表")
-                            }
-                            TextButton(
-                                onClick = {
-                                    inspect(
-                                        "供应商余额",
-                                        "providers.balance",
-                                        buildJsonObject {
-                                            put("id", id)
-                                            put("source", "local")
-                                        },
-                                    )
-                                },
-                                enabled = enabled && !state.adminLoading,
-                            ) {
-                                Text("余额")
-                            }
-                            TextButton(
-                                onClick = {
-                                    actions.adminCommand(
-                                        "manager",
-                                        managerInput("providers.duplicate", input),
-                                    )
-                                },
-                                enabled = enabled,
-                            ) {
-                                Text("复制")
+                                Text("编辑配置")
                             }
                         }
                     }
@@ -334,54 +411,85 @@ fun AdminPage(
                 }
             }
             "credentials" -> {
-                item { Banner("凭据通过已配对的加密连接写入 PC 凭据库，手机不保存明文密钥。") }
-                listOf(
-                        "http" to "HTTP API 密钥",
-                        "smtp" to "SMTP 密码",
-                        "resend" to "Resend API 密钥",
-                        "cloud" to "云端接力令牌",
-                        "serverChan" to "Server 酱 SendKey",
-                        "proxy" to "网络代理密码",
+                item {
+                    Text(
+                        "凭据保存在电脑，通过已配对的加密连接更新。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    .forEach { (kind, title) ->
-                        item {
-                            Panel {
-                                SectionTitle(title)
-                                Text(
-                                    if (data[kind].obj()["configured"].text() == "true") "PC 已配置"
-                                    else "尚未配置",
-                                    style = MaterialTheme.typography.bodySmall,
+                }
+                item {
+                    SettingsGroup("访问凭据") {
+                        listOf(
+                                "http" to "HTTP API 密钥",
+                                "smtp" to "SMTP 密码",
+                                "resend" to "Resend API 密钥",
+                                "cloud" to "云端接力令牌",
+                                "serverChan" to "Server 酱 SendKey",
+                                "proxy" to "网络代理密码",
+                            )
+                            .forEachIndexed { index, (kind, title) ->
+                                if (index > 0) SettingDivider()
+                                var menu by remember { mutableStateOf(false) }
+                                SettingRow(
+                                    title,
+                                    if (data[kind].obj()["configured"].text() == "true") "已配置"
+                                    else "未配置",
+                                    enabled = enabled,
+                                    onClick = {
+                                        editing =
+                                            "credential:$kind" to
+                                                buildJsonObject { put("value", "") }
+                                    },
+                                    trailing = {
+                                        Box {
+                                            IconButton(
+                                                onClick = { menu = true },
+                                                enabled = enabled,
+                                            ) {
+                                                Icon(Icons.Outlined.MoreHoriz, "$title 操作")
+                                            }
+                                            DropdownMenu(menu, { menu = false }) {
+                                                DropdownMenuItem(
+                                                    text = { Text("设置凭据") },
+                                                    onClick = {
+                                                        menu = false
+                                                        editing =
+                                                            "credential:$kind" to
+                                                                buildJsonObject { put("value", "") }
+                                                    },
+                                                )
+                                                DropdownMenuItem(
+                                                    text = {
+                                                        Text(
+                                                            "删除凭据",
+                                                            color = MaterialTheme.colorScheme.error,
+                                                        )
+                                                    },
+                                                    onClick = {
+                                                        menu = false
+                                                        confirm(
+                                                            ConfirmAction(
+                                                                "删除凭据",
+                                                                "删除 PC 保存的$title。",
+                                                            ) {
+                                                                actions.adminCommand(
+                                                                    "credentials.delete",
+                                                                    buildJsonObject {
+                                                                        put("kind", kind)
+                                                                    },
+                                                                )
+                                                            }
+                                                        )
+                                                    },
+                                                )
+                                            }
+                                        }
+                                    },
                                 )
-                                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    OutlinedButton(
-                                        onClick = {
-                                            editing =
-                                                "credential:$kind" to
-                                                    buildJsonObject { put("value", "") }
-                                        },
-                                        enabled = enabled,
-                                    ) {
-                                        Text("设置凭据")
-                                    }
-                                    TextButton(
-                                        onClick = {
-                                            confirm(
-                                                ConfirmAction("删除凭据", "删除 PC 保存的$title。") {
-                                                    actions.adminCommand(
-                                                        "credentials.delete",
-                                                        buildJsonObject { put("kind", kind) },
-                                                    )
-                                                }
-                                            )
-                                        },
-                                        enabled = enabled,
-                                    ) {
-                                        Text("删除")
-                                    }
-                                }
                             }
-                        }
                     }
+                }
             }
             "billing" -> {
                 val settings = data["settings"].obj()
@@ -582,99 +690,86 @@ fun AdminPage(
     editing?.let { (kind, initial) ->
         var draft by remember(kind, initial) { mutableStateOf(initial) }
         val errors = remember(kind, initial) { mutableStateMapOf<String, Boolean>() }
-        AlertDialog(
-            onDismissRequest = { editing = null },
-            title = {
-                Text(
-                    when {
-                        kind == "provider" -> "供应商配置"
-                        kind.startsWith("credential:") -> "设置 PC 凭据"
-                        kind == "price" -> "模型单价"
-                        kind == "group" -> "供应商分组"
-                        else -> "计费规则"
-                    }
-                )
-            },
-            text = {
-                Column(
-                    Modifier.verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
-                ) {
-                    if (kind.startsWith("credential:"))
-                        OutlinedTextField(
-                            draft["value"].text(),
-                            { draft = buildJsonObject { put("value", it) } },
-                            label = { Text("新凭据") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            modifier = Modifier.fillMaxWidth(),
+        val title =
+            when {
+                kind == "provider" -> "供应商配置"
+                kind.startsWith("credential:") -> "设置 PC 凭据"
+                kind == "price" -> "模型单价"
+                kind == "group" -> "供应商分组"
+                else -> "计费规则"
+            }
+        EditorSheet(
+            title,
+            { editing = null },
+            save = {
+                when {
+                    kind == "provider" ->
+                        actions.adminCommand(
+                            "manager",
+                            managerInput(
+                                "providers.save",
+                                buildJsonObject { put("provider", draft) },
+                            ),
                         )
-                    else
-                        draft
-                            .filterKeys { it !in listOf("id", "updatedMs") }
-                            .forEach { (key, value) ->
-                                if (key == "providerId" && data["providers"] is JsonArray) {
-                                    Text("供应商", style = MaterialTheme.typography.labelLarge)
-                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        data["providers"].list().forEach { provider ->
-                                            val p = provider.obj()
-                                            FilterChip(
-                                                value == p["id"],
-                                                { draft = JsonObject(draft + (key to p["id"]!!)) },
-                                                label = { Text(p["name"].text()) },
-                                            )
-                                        }
-                                    }
-                                } else
-                                    ConfigField(
-                                        key,
-                                        value,
-                                        changed = { next ->
-                                            draft = JsonObject(draft + (key to next))
-                                        },
-                                        invalid = { path, bad -> errors[path] = bad },
-                                    )
-                            }
+                    kind == "price" -> actions.adminCommand("billing.savePrice", draft)
+                    kind == "rule" -> actions.adminCommand("billing.saveRule", draft)
+                    kind == "group" -> actions.adminCommand("billing.saveGroup", draft)
+                    kind.startsWith("credential:") ->
+                        actions.adminCommand(
+                            "credentials.set",
+                            buildJsonObject {
+                                put("kind", kind.substringAfter(':'))
+                                put("value", draft["value"] ?: JsonNull)
+                            },
+                        )
                 }
+                editing = null
             },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        when {
-                            kind == "provider" ->
-                                actions.adminCommand(
-                                    "manager",
-                                    managerInput(
-                                        "providers.save",
-                                        buildJsonObject { put("provider", draft) },
-                                    ),
-                                )
-                            kind == "price" -> actions.adminCommand("billing.savePrice", draft)
-                            kind == "rule" -> actions.adminCommand("billing.saveRule", draft)
-                            kind == "group" -> actions.adminCommand("billing.saveGroup", draft)
-                            kind.startsWith("credential:") ->
-                                actions.adminCommand(
-                                    "credentials.set",
-                                    buildJsonObject {
-                                        put("kind", kind.substringAfter(':'))
-                                        put("value", draft["value"] ?: JsonNull)
-                                    },
+            saveEnabled =
+                enabled &&
+                    errors.values.none { it } &&
+                    (!kind.startsWith("credential:") || draft["value"].text().isNotBlank()) &&
+                    (kind !in listOf("rule", "group") || draft["providerId"].text().isNotBlank()),
+            saveLabel = "保存到 PC",
+        ) {
+            if (kind.startsWith("credential:"))
+                OutlinedTextField(
+                    draft["value"].text(),
+                    { draft = buildJsonObject { put("value", it) } },
+                    label = { Text("新凭据") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+            else
+                SettingsGroup {
+                    draft
+                        .filterKeys { it !in listOf("id", "updatedMs") }
+                        .entries
+                        .forEachIndexed { index, (key, value) ->
+                            if (index > 0) SettingDivider()
+                            if (key == "providerId" && data["providers"] is JsonArray) {
+                                val choices =
+                                    data["providers"]
+                                        .list()
+                                        .map { it.obj() }
+                                        .map {
+                                            it["id"].text() to
+                                                it["name"].text(it["providerName"].text())
+                                        }
+                                ChoiceSetting("供应商", value.text(), choices) {
+                                    draft = JsonObject(draft + (key to JsonPrimitive(it)))
+                                }
+                            } else
+                                ConfigField(
+                                    key,
+                                    value,
+                                    changed = { draft = JsonObject(draft + (key to it)) },
+                                    invalid = { path, bad -> errors[path] = bad },
                                 )
                         }
-                        editing = null
-                    },
-                    enabled =
-                        enabled &&
-                            errors.values.none { it } &&
-                            (!kind.startsWith("credential:") ||
-                                draft["value"].text().isNotBlank()) &&
-                            (kind !in listOf("rule", "group") ||
-                                draft["providerId"].text().isNotBlank()),
-                ) {
-                    Text("保存到 PC")
                 }
-            },
-            dismissButton = { TextButton(onClick = { editing = null }) { Text("取消") } },
-        )
+        }
     }
     inspection?.let { (title, value) ->
         AlertDialog(

@@ -2,7 +2,6 @@
 
 package com.codexlauncher.companion.ui
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
@@ -13,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -140,6 +140,14 @@ private val optionLabels =
         "hours" to "小时",
         "direct" to "直接单价",
         "multiplier" to "倍率",
+        "day" to "指定日期",
+        "lastDay" to "每月最后一天",
+        "xhigh" to "超高",
+        "high" to "高",
+        "medium" to "中",
+        "low" to "低",
+        "minimal" to "极简",
+        "none" to "关闭",
     )
 private val groups =
     listOf(
@@ -209,74 +217,205 @@ fun ConfigurationPage(state: CompanionState, enabled: Boolean, actions: Launcher
         return
     }
     var draft by remember(config.revision) { mutableStateOf(config.value) }
-    val errors = remember(config.revision) { mutableStateMapOf<String, Boolean>() }
-    var group by rememberSaveable { mutableIntStateOf(0) }
     val patch = configurationDiff(config.value, draft)
+    val assigned = groups.flatMap { it.second }.toSet() + "configVersion"
+    val displayedGroups = groups + listOf("其他选项" to draft.keys.filter { it !in assigned })
+    val conflict =
+        state.snapshot?.configurationRevision?.let { it.isNotEmpty() && it != config.revision } ==
+            true
+    var discard by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
-        FlowRow(
-            Modifier.padding(horizontal = 20.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            groups.forEachIndexed { index, value ->
-                FilterChip(group == index, { group = index }, label = { Text(value.first) })
-            }
-        }
         LazyColumn(
-            Modifier.weight(1f),
+            Modifier.weight(1f).testTag("configuration-list"),
             contentPadding = PaddingValues(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
             item {
-                Banner(
-                    if (
-                        state.snapshot?.configurationRevision?.let {
-                            it.isNotEmpty() && it != config.revision
-                        } == true
-                    )
-                        "PC 配置已有新版本。保存时会检查冲突，也可以重新读取。"
-                    else "修改会保存到 PC，并用于下次启动。运行页可即时调整本轮保活。"
+                Text("运行配置", style = MaterialTheme.typography.headlineMedium)
+                Text(
+                    "设置自动同步到电脑，下次启动时生效。",
+                    Modifier.padding(top = 8.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            if (conflict) item { Banner("PC 上已有新配置。保存时会检查冲突，也可以重新读取。", true) }
             state.adminError?.let { item { Banner(it, true) } }
-            groups[group]
-                .second
-                .filter { draft.containsKey(it) }
-                .forEach { key ->
-                    item(key = "${config.revision}-$key") {
-                        Panel {
-                            ConfigField(
-                                key,
-                                draft[key]!!,
-                                config.secretFields,
-                                { next -> draft = JsonObject(draft + (key to next)) },
-                            ) { path, invalid ->
-                                errors[path] = invalid
+            displayedGroups.forEach { (title, keys) ->
+                val fields = keys.filter { draft.containsKey(it) }
+                if (fields.isNotEmpty())
+                    item(key = title) {
+                        SettingsGroup(title) {
+                            fields.forEachIndexed { index, key ->
+                                if (index > 0) SettingDivider()
+                                ConfigField(
+                                    key,
+                                    draft[key]!!,
+                                    config.secretFields,
+                                    changed = { next -> draft = JsonObject(draft + (key to next)) },
+                                )
                             }
                         }
                     }
-                }
+            }
+            item {
+                Text(
+                    "运行中的保活开关和内容类型，可在“运行”页即时调整。",
+                    Modifier.padding(horizontal = 12.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
-        Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
-            Row(
-                Modifier.fillMaxWidth().padding(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+        Surface(color = MaterialTheme.colorScheme.background) {
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                OutlinedButton(
-                    onClick = actions.loadConfiguration,
-                    enabled = !state.busy && !state.configurationLoading,
+                if (patch.isNotEmpty())
+                    Text(
+                        "有未保存的修改",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("重新读取")
-                }
-                Button(
-                    onClick = { actions.saveConfiguration(config.revision, patch) },
-                    enabled = enabled && patch.isNotEmpty() && errors.values.none { it },
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text(if (state.busy) "正在保存…" else "保存到 PC")
+                    TextButton(
+                        onClick = {
+                            if (patch.isEmpty()) actions.loadConfiguration() else discard = true
+                        },
+                        enabled = !state.busy && !state.configurationLoading,
+                    ) {
+                        Text("重新读取")
+                    }
+                    Button(
+                        onClick = { actions.saveConfiguration(config.revision, patch) },
+                        enabled = enabled && patch.isNotEmpty(),
+                        modifier = Modifier.weight(1f).heightIn(min = 50.dp),
+                    ) {
+                        Text(if (state.busy) "正在保存…" else "保存到 PC")
+                    }
                 }
             }
         }
     }
+    if (discard)
+        AlertDialog(
+            onDismissRequest = { discard = false },
+            title = { Text("重新读取配置") },
+            text = { Text("这会放弃本页尚未保存的修改，读取电脑当前配置。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        discard = false
+                        draft = config.value
+                        actions.loadConfiguration()
+                    }
+                ) {
+                    Text("重新读取")
+                }
+            },
+            dismissButton = { TextButton(onClick = { discard = false }) { Text("继续编辑") } },
+        )
+}
+
+internal fun configChoices(path: String): List<String> =
+    when (path.substringAfterLast('.')) {
+        "provider" -> listOf("codex", "claude")
+        "executionMode" -> listOf("cli", "http")
+        "reasoningEffort" -> listOf("xhigh", "high", "medium", "low", "minimal", "none")
+        "keepAliveContentMode" -> listOf("configured", "questionBank", "ascii")
+        "kind" ->
+            when (path) {
+                "schedule.kind" ->
+                    listOf("daily", "weekly", "monthly", "interval", "atLogon", "atStartup", "cron")
+                "schedule.day.kind" -> listOf("day", "lastDay")
+                else -> emptyList()
+            }
+        "unit" -> listOf("minutes", "hours")
+        "mode" -> if (path == "mode") listOf("direct", "multiplier") else emptyList()
+        "upstreamApi" -> listOf("responses", "chat_completions", "anthropic_messages", "gemini")
+        else -> emptyList()
+    }
+
+internal fun configurationSummary(value: JsonElement, secret: Boolean = false): String =
+    when {
+        secret -> if (value.text().isBlank()) "未设置" else "已填写"
+        value is JsonObject -> {
+            val enabled = value["enabled"]?.text()
+            val model = value["model"].text()
+            when {
+                enabled == "true" -> "已开启"
+                enabled == "false" -> "已关闭"
+                model.isNotBlank() -> model
+                else -> "${value.size} 项设置"
+            }
+        }
+        value is JsonArray -> "${value.size} 项"
+        value == JsonNull -> "使用默认值"
+        else -> optionLabels[value.text()] ?: value.text().ifBlank { "未设置" }
+    }
+
+private data class NumberRule(
+    val min: Double,
+    val max: Double,
+    val integer: Boolean = true,
+    val step: String = "1",
+) {
+    val hint: String
+        get() {
+            fun display(value: Double) = value.toBigDecimal().stripTrailingZeros().toPlainString()
+            return "请输入 ${display(min)} 至 ${display(max)} 的${if (integer) "整数" else "数值"}"
+        }
+}
+
+private fun numberRule(path: String): NumberRule? =
+    when (path) {
+        "interval" -> NumberRule(1.0, 86400.0)
+        "maxTries" -> NumberRule(0.0, 100000.0)
+        "concurrency" -> NumberRule(1.0, 99.0)
+        "httpConfig.concurrency",
+        "claudeHttpConfig.concurrency" -> NumberRule(1.0, 256.0)
+        "httpConfig.intervalSeconds",
+        "claudeHttpConfig.intervalSeconds" -> NumberRule(0.05, 86400.0, false, "0.05")
+        "httpConfig.timeoutSeconds",
+        "claudeHttpConfig.timeoutSeconds" -> NumberRule(1.0, 600.0)
+        "keepAliveIntervalMinutes" -> NumberRule(1.0, 1440.0)
+        "connectionGuard.healthIntervalSeconds" -> NumberRule(15.0, 86400.0)
+        "connectionGuard.failureThreshold" -> NumberRule(1.0, 10.0)
+        "connectionGuard.probeTimeoutSeconds" -> NumberRule(10.0, 3600.0)
+        "schedule.everyDays" -> NumberRule(1.0, 365.0)
+        "schedule.everyWeeks" -> NumberRule(1.0, 52.0)
+        "schedule.day.day" -> NumberRule(1.0, 31.0)
+        "schedule.delaySeconds" -> NumberRule(0.0, 599999.0)
+        else -> null
+    }
+
+internal fun parseConfigNumber(raw: String, nullable: Boolean, path: String = ""): JsonElement? {
+    if (nullable && raw.isBlank()) return JsonNull
+    val rule = numberRule(path)
+    val parsed =
+        if (rule?.integer == true || path.substringAfterLast('.') == "contextWindow")
+            raw.toBigDecimalOrNull()?.let {
+                runCatching { JsonPrimitive(it.longValueExact()) }.getOrNull()
+            }
+        else
+            raw.toLongOrNull()?.let(::JsonPrimitive)
+                ?: raw.toDoubleOrNull()?.takeIf { it.isFinite() }?.let(::JsonPrimitive)
+    val number = parsed?.doubleOrNull ?: return null
+    if (rule != null && number !in rule.min..rule.max) return null
+    if (path.substringAfterLast('.') == "contextWindow" && number < 1) return null
+    return parsed
+}
+
+private fun stepConfigNumber(path: String, raw: String, direction: Int): String {
+    val rule = numberRule(path)
+    val step = (rule?.step ?: "1").toBigDecimal() * direction.toBigDecimal()
+    var value = (raw.toBigDecimalOrNull() ?: (rule?.min ?: 0.0).toBigDecimal()) + step
+    if (rule != null) value = value.coerceIn(rule.min.toBigDecimal(), rule.max.toBigDecimal())
+    return value.stripTrailingZeros().toPlainString()
 }
 
 @Composable
@@ -288,270 +427,325 @@ fun ConfigField(
     invalid: (String, Boolean) -> Unit = { _, _ -> },
 ) {
     val key = path.substringAfterLast('.')
-    val label = fieldLabels[key] ?: key
-    when (value) {
-        is JsonObject -> {
-            var expanded by rememberSaveable(path) { mutableStateOf(path.count { it == '.' } == 0) }
-            TextButton(onClick = { expanded = !expanded }, contentPadding = PaddingValues(0.dp)) {
-                Text(
-                    label,
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.weight(1f),
-                )
-                Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null)
-            }
-            AnimatedVisibility(expanded) {
-                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    value.forEach { (child, nested) ->
-                        if (child != "configVersion" && child != "updatedMs")
-                            ConfigField(
-                                "$path.$child",
-                                nested,
-                                secrets,
-                                { next ->
-                                    if (path == "schedule" && child == "kind")
-                                        changed(scheduleDefaults(next.text()))
-                                    else if (path == "schedule.day" && child == "kind")
-                                        changed(
-                                            if (next.text() == "lastDay")
-                                                buildJsonObject { put("kind", "lastDay") }
-                                            else
-                                                buildJsonObject {
-                                                    put("kind", "day")
-                                                    put("day", 1)
-                                                }
-                                        )
-                                    else changed(JsonObject(value + (child to next)))
-                                },
-                                invalid,
+    val label = fieldLabels[key] ?: if (key.toIntOrNull() != null) "第 ${key.toInt() + 1} 项" else key
+    val secret = key in listOf("apiKey", "password", "token", "authJson") || path in secrets
+    if (value is JsonPrimitive && !value.isString && value.booleanOrNull != null) {
+        ToggleSetting(label, value.boolean, modifier = Modifier.testTag("config-$path")) {
+            changed(JsonPrimitive(it))
+        }
+        return
+    }
+    val choices = configChoices(path)
+    if (choices.isNotEmpty()) {
+        ChoiceSetting(
+            label,
+            value.text(),
+            choices.map { it to (optionLabels[it] ?: it) },
+            modifier = Modifier.testTag("config-$path"),
+        ) {
+            changed(JsonPrimitive(it))
+        }
+        return
+    }
+    var editing by remember { mutableStateOf(false) }
+    SettingRow(
+        label,
+        if (path in secrets && value.text().isBlank()) "PC 已保存"
+        else configurationSummary(value, secret),
+        modifier = Modifier.testTag("config-$path"),
+        onClick = { editing = true },
+    )
+    if (editing) {
+        var draft by remember(path) { mutableStateOf(value) }
+        var raw by rememberSaveable(path) { mutableStateOf(value.text()) }
+        val numeric =
+            value is JsonPrimitive &&
+                ((!value.isString && value != JsonNull) || key == "contextWindow")
+        val parsed =
+            if (numeric) parseConfigNumber(raw, key == "contextWindow", path)
+            else if (value == JsonNull && raw.isEmpty()) JsonNull else JsonPrimitive(raw)
+        EditorSheet(
+            label,
+            {
+                editing = false
+                invalid(path, false)
+            },
+            save = {
+                changed(if (value is JsonObject || value is JsonArray) draft else parsed!!)
+                invalid(path, false)
+                editing = false
+            },
+            saveEnabled =
+                when (value) {
+                    is JsonObject -> true
+                    is JsonArray ->
+                        path !in
+                            listOf(
+                                "schedule.days",
+                                "schedule.months",
+                                "requestContent.categories",
+                            ) || draft.list().isNotEmpty()
+                    else -> parsed != null
+                },
+        ) {
+            when (value) {
+                is JsonObject -> ConfigObjectEditor(path, draft.obj(), secrets) { draft = it }
+                is JsonArray -> ConfigArrayEditor(path, draft as JsonArray, secrets) { draft = it }
+                else -> {
+                    if (numeric) {
+                        Text(
+                            numberRule(path)?.hint ?: "输入数值，或使用下方按钮微调。",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            CircleAction(
+                                Icons.Outlined.Remove,
+                                "减少$label",
+                                { raw = stepConfigNumber(path, raw, -1) },
                             )
+                            OutlinedTextField(
+                                raw,
+                                { raw = it },
+                                Modifier.weight(1f).testTag("config-input-$path"),
+                                label = { Text("数值") },
+                                singleLine = true,
+                                isError = parsed == null,
+                                keyboardOptions =
+                                    KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            )
+                            CircleAction(
+                                Icons.Outlined.Add,
+                                "增加$label",
+                                { raw = stepConfigNumber(path, raw, 1) },
+                            )
+                        }
+                        if (parsed == null)
+                            Text(
+                                numberRule(path)?.hint ?: "请输入有效数值",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                    } else {
+                        val multiline =
+                            key in
+                                listOf(
+                                    "prompt",
+                                    "metaPrompt",
+                                    "command",
+                                    "claudeCommand",
+                                    "tomlConfig",
+                                    "authJson",
+                                    "expression",
+                                )
+                        OutlinedTextField(
+                            raw,
+                            { raw = it },
+                            Modifier.fillMaxWidth().testTag("config-input-$path"),
+                            label = { Text(label) },
+                            minLines = if (multiline && !secret) 4 else 1,
+                            maxLines = if (multiline && !secret) 12 else 2,
+                            singleLine = secret,
+                            visualTransformation =
+                                if (secret) PasswordVisualTransformation()
+                                else VisualTransformation.None,
+                            shape = MaterialTheme.shapes.medium,
+                        )
                     }
+                    if (path in secrets)
+                        Text(
+                            "留空保留电脑已保存的凭据；删除请在凭据管理中操作。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                 }
             }
         }
-        is JsonArray -> {
-            if (key == "modelMappings" || value.any { it is JsonObject }) {
-                Text(label, style = MaterialTheme.typography.labelLarge)
-                value.forEachIndexed { index, item ->
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ConfigField(
-                            "$path.$index",
-                            item,
-                            secrets,
-                            { next ->
-                                changed(JsonArray(value.toMutableList().apply { set(index, next) }))
-                            },
-                            invalid,
+    }
+}
+
+@Composable
+private fun ConfigObjectEditor(
+    path: String,
+    value: JsonObject,
+    secrets: List<String>,
+    changed: (JsonObject) -> Unit,
+) {
+    SettingsGroup {
+        value
+            .filterKeys { it !in listOf("configVersion", "updatedMs") }
+            .entries
+            .forEachIndexed { index, (child, nested) ->
+                if (index > 0) SettingDivider()
+                ConfigField(
+                    "$path.$child",
+                    nested,
+                    secrets,
+                    changed = { next ->
+                        changed(
+                            if (path == "schedule" && child == "kind") scheduleDefaults(next.text())
+                            else if (path == "schedule.day" && child == "kind") {
+                                if (next.text() == "lastDay")
+                                    buildJsonObject { put("kind", "lastDay") }
+                                else
+                                    buildJsonObject {
+                                        put("kind", "day")
+                                        put("day", 1)
+                                    }
+                            } else JsonObject(value + (child to next))
                         )
-                        TextButton(
+                    },
+                )
+            }
+    }
+}
+
+@Composable
+private fun ConfigArrayEditor(
+    path: String,
+    value: JsonArray,
+    secrets: List<String>,
+    changed: (JsonArray) -> Unit,
+) {
+    val key = path.substringAfterLast('.')
+    val choices =
+        when (path) {
+            "requestContent.categories" ->
+                listOf(
+                    "aiQuestion" to "AI 问答",
+                    "codeExplanation" to "代码讲解",
+                    "boundaryCheck" to "边界检查",
+                    "bugAnalysis" to "故障分析",
+                )
+            "schedule.days" ->
+                listOf(
+                    "monday" to "周一",
+                    "tuesday" to "周二",
+                    "wednesday" to "周三",
+                    "thursday" to "周四",
+                    "friday" to "周五",
+                    "saturday" to "周六",
+                    "sunday" to "周日",
+                )
+            "schedule.months" ->
+                listOf(
+                        "january",
+                        "february",
+                        "march",
+                        "april",
+                        "may",
+                        "june",
+                        "july",
+                        "august",
+                        "september",
+                        "october",
+                        "november",
+                        "december",
+                    )
+                    .mapIndexed { index, month -> month to "${index + 1} 月" }
+            else -> emptyList()
+        }
+    if (choices.isNotEmpty()) {
+        Text(
+            "至少选择一项。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        SettingsGroup {
+            choices.forEachIndexed { index, (id, title) ->
+                if (index > 0) SettingDivider()
+                val selected = value.any { it.text() == id }
+                SettingRow(
+                    title,
+                    onClick = {
+                        changed(
+                            JsonArray(
+                                if (selected) value.filterNot { it.text() == id }
+                                else value + JsonPrimitive(id)
+                            )
+                        )
+                    },
+                    trailing = { Checkbox(selected, null) },
+                )
+            }
+        }
+    } else {
+        if (value.isNotEmpty())
+            SettingsGroup {
+                value.forEachIndexed { index, element ->
+                    if (index > 0) SettingDivider()
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.weight(1f)) {
+                            androidx.compose.runtime.key(element.toString(), index) {
+                                ConfigField(
+                                    "$path.$index",
+                                    element,
+                                    secrets,
+                                    changed = { next ->
+                                        changed(
+                                            JsonArray(
+                                                value.toMutableList().apply { set(index, next) }
+                                            )
+                                        )
+                                    },
+                                )
+                            }
+                        }
+                        IconButton(
                             onClick = {
                                 changed(JsonArray(value.filterIndexed { i, _ -> i != index }))
                             }
                         ) {
-                            Text("移除此映射")
+                            Icon(Icons.Outlined.RemoveCircleOutline, "移除第 ${index + 1} 项")
                         }
                     }
                 }
-                if (key == "modelMappings")
-                    OutlinedButton(
-                        onClick = {
-                            changed(
-                                JsonArray(
-                                    value +
-                                        buildJsonObject {
-                                            put("model", "")
-                                            put("displayName", "")
-                                            put("contextWindow", JsonNull)
-                                        }
-                                )
-                            )
-                        }
-                    ) {
-                        Text("添加模型映射")
-                    }
-            } else if (path in listOf("schedule.days", "schedule.months")) {
-                Text(label, style = MaterialTheme.typography.labelLarge)
-                val choices =
-                    if (path == "schedule.days")
-                        listOf(
-                            "monday" to "周一",
-                            "tuesday" to "周二",
-                            "wednesday" to "周三",
-                            "thursday" to "周四",
-                            "friday" to "周五",
-                            "saturday" to "周六",
-                            "sunday" to "周日",
+            }
+        if (key == "modelMappings") {
+            OutlinedButton(
+                onClick = {
+                    changed(
+                        JsonArray(
+                            value +
+                                buildJsonObject {
+                                    put("model", "")
+                                    put("displayName", "")
+                                    put("contextWindow", JsonNull)
+                                }
                         )
-                    else
-                        listOf(
-                                "january",
-                                "february",
-                                "march",
-                                "april",
-                                "may",
-                                "june",
-                                "july",
-                                "august",
-                                "september",
-                                "october",
-                                "november",
-                                "december",
-                            )
-                            .mapIndexed { index, month -> month to "${index + 1} 月" }
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    choices.forEach { (id, title) ->
-                        val selected = value.any { it.text() == id }
-                        FilterChip(
-                            selected,
-                            {
-                                changed(
-                                    JsonArray(
-                                        if (selected) value.filterNot { it.text() == id }
-                                        else value + JsonPrimitive(id)
-                                    )
-                                )
-                            },
-                            label = { Text(title) },
-                        )
-                    }
-                }
-            } else {
-                var text by
-                    rememberSaveable(path) {
-                        mutableStateOf(value.joinToString("\n") { it.text() })
-                    }
-                var emitted by rememberSaveable(path) { mutableStateOf(value.toString()) }
-                LaunchedEffect(value) {
-                    if (value.toString() != emitted) text = value.joinToString("\n") { it.text() }
-                    emitted = value.toString()
-                }
+                    )
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))
+                Text("添加模型映射")
+            }
+        } else if (value.none { it is JsonObject }) {
+            var entry by rememberSaveable { mutableStateOf("") }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 OutlinedTextField(
-                    text,
-                    {
-                        text = it
-                        val parsed =
-                            JsonArray(
-                                it.lines()
-                                    .map(String::trim)
-                                    .filter(String::isNotEmpty)
-                                    .map(::JsonPrimitive)
-                            )
-                        emitted = parsed.toString()
-                        changed(parsed)
-                    },
-                    label = { Text(label) },
-                    supportingText = { Text("每行一项") },
-                    minLines = 2,
-                    modifier = Modifier.fillMaxWidth(),
+                    entry,
+                    { entry = it },
+                    Modifier.weight(1f),
+                    label = { Text("新增项目") },
                 )
+                IconButton(
+                    onClick = {
+                        changed(JsonArray(value + JsonPrimitive(entry.trim())))
+                        entry = ""
+                    },
+                    enabled = entry.isNotBlank(),
+                ) {
+                    Icon(Icons.Outlined.AddCircleOutline, "添加项目")
+                }
             }
         }
-        is JsonPrimitive ->
-            when {
-                !value.isString && value.booleanOrNull != null ->
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-                        Switch(value.boolean, { changed(JsonPrimitive(it)) })
-                    }
-                else -> {
-                    val choices =
-                        when (key) {
-                            "provider" -> listOf("codex", "claude")
-                            "executionMode" -> listOf("cli", "http")
-                            "keepAliveContentMode" -> listOf("configured", "questionBank", "ascii")
-                            "kind" ->
-                                if (path == "schedule.kind")
-                                    listOf(
-                                        "daily",
-                                        "weekly",
-                                        "monthly",
-                                        "interval",
-                                        "atLogon",
-                                        "atStartup",
-                                        "cron",
-                                    )
-                                else if (path == "schedule.day.kind") listOf("day", "lastDay")
-                                else emptyList()
-                            "unit" -> listOf("minutes", "hours")
-                            "mode" ->
-                                if (path == "mode") listOf("direct", "multiplier") else emptyList()
-                            "upstreamApi" ->
-                                listOf(
-                                    "responses",
-                                    "chat_completions",
-                                    "anthropic_messages",
-                                    "gemini",
-                                )
-                            else -> emptyList()
-                        }
-                    if (choices.isNotEmpty()) {
-                        Text(label, style = MaterialTheme.typography.labelLarge)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            choices.forEach { choice ->
-                                FilterChip(
-                                    value.text() == choice,
-                                    { changed(JsonPrimitive(choice)) },
-                                    label = { Text(optionLabels[choice] ?: choice) },
-                                )
-                            }
-                        }
-                    } else {
-                        var text by
-                            rememberSaveable(path) { mutableStateOf(value.contentOrNull.orEmpty()) }
-                        var emitted by rememberSaveable(path) { mutableStateOf(value.toString()) }
-                        var bad by rememberSaveable(path) { mutableStateOf(false) }
-                        LaunchedEffect(value) {
-                            if (value.toString() != emitted) {
-                                text = value.contentOrNull.orEmpty()
-                                bad = false
-                                invalid(path, false)
-                            }
-                            emitted = value.toString()
-                        }
-                        val numeric =
-                            (!value.isString && value != JsonNull) || key == "contextWindow"
-                        val secret = key in listOf("apiKey", "password", "token", "authJson")
-                        OutlinedTextField(
-                            text,
-                            { raw ->
-                                text = raw
-                                val parsed: JsonElement? =
-                                    if (key == "contextWindow" && raw.isBlank()) JsonNull
-                                    else if (numeric)
-                                        raw.toLongOrNull()?.let(::JsonPrimitive)
-                                            ?: raw.toDoubleOrNull()
-                                                ?.takeIf { it.isFinite() }
-                                                ?.let(::JsonPrimitive)
-                                    else JsonPrimitive(raw)
-                                bad = parsed == null
-                                invalid(path, bad)
-                                if (parsed != null) {
-                                    emitted = parsed.toString()
-                                    changed(parsed)
-                                }
-                            },
-                            label = { Text(label) },
-                            supportingText =
-                                if (path in secrets) ({ Text("PC 已保存密钥；不修改则保留") }) else null,
-                            modifier = Modifier.fillMaxWidth(),
-                            isError = bad,
-                            keyboardOptions =
-                                KeyboardOptions(
-                                    keyboardType =
-                                        if (numeric) KeyboardType.Decimal else KeyboardType.Text
-                                ),
-                            visualTransformation =
-                                if (secret) PasswordVisualTransformation()
-                                else VisualTransformation.None,
-                            minLines =
-                                if (key in listOf("prompt", "metaPrompt", "command", "tomlConfig"))
-                                    3
-                                else 1,
-                            maxLines = if (secret) 1 else 8,
-                        )
-                    }
-                }
-            }
     }
 }
 

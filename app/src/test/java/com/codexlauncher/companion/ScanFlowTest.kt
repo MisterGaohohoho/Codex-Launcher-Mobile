@@ -225,6 +225,7 @@ class ScanFlowTest {
         compose.mainClock.advanceTimeBy(5000)
         compose.waitForIdle()
         compose.onNodeWithTag("tab-3").performClick()
+        compose.onNodeWithText("已配对的开发电脑").performClick()
         compose.onNodeWithText("重新配对").performScrollTo().assertIsEnabled().performClick()
         try {
             compose.onNodeWithText("扫码连接电脑").assertExists()
@@ -234,7 +235,6 @@ class ScanFlowTest {
         compose.onNodeWithText("扫码连接电脑").performClick()
         result()
         awaitOnline(model, 2)
-        compose.onNodeWithTag("tab-0").assertIsSelected()
         compose.onNodeWithTag("tab-0").assertIsSelected()
         assertEquals(2, api.pairs)
         assertFalse(compose.activity.isFinishing)
@@ -247,6 +247,7 @@ class ScanFlowTest {
         compose.onNodeWithText("扫码连接电脑").performClick()
         compose.runOnIdle { registry.dispatchResult(registry.permissionCode, false) }
         compose.onNodeWithText("相机权限未开启，也可以在下方粘贴配对内容。").assertIsDisplayed()
+        compose.onNodeWithText("粘贴配对内容").assertIsDisplayed().performClick()
         compose.onNodeWithText("电脑复制的配对内容").assertExists()
         assertEquals(0, api.pairs)
         assertEquals(0, registry.scans)

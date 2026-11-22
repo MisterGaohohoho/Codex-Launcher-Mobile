@@ -60,10 +60,20 @@ class CompanionUiTest {
                 )
             }
         }
-        compose.onNodeWithText("请求间隔（秒）").performScrollTo().performTextReplacement("0.")
-        compose.onNodeWithText("0.").assertExists()
-        compose.onNodeWithText("请求间隔（秒）").performTextReplacement("0.5")
         capture("configuration-light")
+        compose.onNodeWithTag("config-httpConfig").performClick()
+        compose.onNodeWithTag("config-httpConfig.intervalSeconds").performClick()
+        compose
+            .onNodeWithTag("config-input-httpConfig.intervalSeconds")
+            .performTextReplacement("0.")
+        compose.onNodeWithText("0.").assertExists()
+        compose
+            .onNodeWithTag("config-input-httpConfig.intervalSeconds")
+            .performTextReplacement("0.5")
+        capture("configuration-number-light")
+        compose.onNodeWithTag("sheet-save-请求间隔（秒）").performClick()
+        capture("configuration-fields-light")
+        compose.onNodeWithTag("sheet-save-Codex HTTP 参数").performClick()
         compose.onNodeWithText("保存到 PC").performClick()
         assertEquals(setOf("httpConfig"), patch?.keys)
         assertEquals("0.5", patch?.get("httpConfig").obj()["intervalSeconds"].text())
@@ -135,7 +145,35 @@ class CompanionUiTest {
             val view = compose.activity.window.decorView
             check(view.width > 0 && view.height > 0)
             val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(bitmap))
+            val canvas = Canvas(bitmap)
+            view.draw(canvas)
+            val origin = IntArray(2)
+            view.getLocationOnScreen(origin)
+            // Sheets and dialogs own separate Android windows. Include each
+            // visible window so screenshots verify the editor, not only its host.
+            org.robolectric.shadows.ShadowDialog.getShownDialogs()
+                .filter { it.isShowing }
+                .forEach { dialog ->
+                    val window = dialog.window ?: return@forEach
+                    val decor = window.decorView
+                    if (decor.width <= 0 || decor.height <= 0) return@forEach
+                    val attrs = window.attributes
+                    if (
+                        attrs.flags and android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND != 0
+                    )
+                        canvas.drawColor(
+                            android.graphics.Color.argb((attrs.dimAmount * 255).toInt(), 0, 0, 0)
+                        )
+                    val location = IntArray(2)
+                    decor.getLocationOnScreen(location)
+                    canvas.save()
+                    canvas.translate(
+                        (location[0] - origin[0]).toFloat(),
+                        (location[1] - origin[1]).toFloat(),
+                    )
+                    decor.draw(canvas)
+                    canvas.restore()
+                }
             destination.outputStream().use { output ->
                 check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
             }
@@ -303,9 +341,10 @@ class CompanionUiTest {
                 )
             }
         }
-        compose.onNodeWithText("验证并配对").assertIsNotEnabled()
         compose.onNodeWithText("扫码连接电脑").performClick()
         assertEquals(1, scans)
+        compose.onNodeWithText("粘贴配对内容").performClick()
+        compose.onNodeWithText("验证并配对").assertIsNotEnabled()
         val content = "{\"type\":\"codex-launcher-pair\",\"fixture\":true}"
         compose.onNodeWithText("电脑复制的配对内容").performTextInput(content)
         compose.onNodeWithText("验证并配对").performScrollTo().performClick()
@@ -324,7 +363,7 @@ class CompanionUiTest {
                 now.longValue = 2000L + poll * 2000
                 state.value = state.value.copy(lastSyncElapsed = now.longValue + 600)
             }
-            compose.onNodeWithText("在线", useUnmergedTree = true).assertIsDisplayed()
+            compose.onNodeWithText("工作电脑 · 在线", useUnmergedTree = true).assertIsDisplayed()
             compose.onNodeWithText("正在连接电脑…").assertDoesNotExist()
             compose.onNodeWithTag("run-control").assertIsEnabled()
             assertEquals(
@@ -438,7 +477,7 @@ class CompanionUiTest {
     }
 
     @Test
-    fun independentHistoryHasAnExplicitForkInsteadOfASendButton() {
+    fun independentHistoryExplainsBothContinuationChoicesAndNeverAttaches() {
         val thread =
             WorkThread(
                 "independent",
@@ -465,9 +504,12 @@ class CompanionUiTest {
         }
         compose.onNodeWithTag("tab-1").performClick()
         compose.onNodeWithTag("send-message").assertDoesNotExist()
-        compose.onNodeWithText("创建分支继续").performClick()
+        compose.onNodeWithTag("choose-session-mode").performClick()
+        compose.onNodeWithTag("continue-original").assertIsNotEnabled()
+        compose.onNodeWithText("连接原会话后台").assertIsDisplayed()
+        capture("workbench-session-choice-readonly")
         assertNull(action)
-        compose.onNodeWithText("确认").performClick()
+        compose.onNodeWithTag("continue-fork").performClick()
         assertEquals("fork", action)
         capture("workbench-readonly-light")
     }
@@ -613,5 +655,198 @@ class CompanionUiTest {
         compose.onNodeWithTag("thread-timeline").performScrollToNode(hasText(text))
         compose.onAllNodesWithText(text).assertCountEquals(1)
         assertFalse(state.value.workbench.detail!!.items.any { it.localEcho })
+    }
+
+    @Test
+    fun sharedSessionOffersOriginalIdentityAndExplicitIndependentFork() {
+        val thread =
+            WorkThread(
+                "desktop-original",
+                "完善移动工作台",
+                "C:/Projects/launcher",
+                "idle",
+                "attach",
+                0,
+                "Codex",
+                "desktop",
+            )
+        val commands = mutableListOf<Pair<String, JsonObject>>()
+        compose.setContent {
+            LauncherTheme(false) {
+                LauncherScreen(
+                    fixture()
+                        .copy(
+                            workbench =
+                                WorkbenchState(
+                                    threads = listOf(thread),
+                                    detail =
+                                        ThreadDetail(
+                                            thread,
+                                            listOf(
+                                                WorkItem(
+                                                    "u1",
+                                                    "t1",
+                                                    "userMessage",
+                                                    "你",
+                                                    "让手机也能接着电脑上的开发。",
+                                                ),
+                                                WorkItem(
+                                                    "a1",
+                                                    "t1",
+                                                    "agentMessage",
+                                                    "Codex",
+                                                    "已经整理好了。\n\n- 配置改为分组列表\n- 可以从侧栏切换会话\n- 开发进展会实时同步",
+                                                ),
+                                            ),
+                                        ),
+                                    streaming = true,
+                                )
+                        ),
+                    2000,
+                    actions =
+                        LauncherActions(
+                            workbenchAction = { action, input -> commands += action to input }
+                        ),
+                )
+            }
+        }
+        compose.onNodeWithTag("tab-1").performClick()
+        capture("workbench-chat-light")
+        compose.onNodeWithTag("session-mode").performClick()
+        compose.onNodeWithTag("continue-original").assertIsEnabled()
+        capture("workbench-session-choice-light")
+        compose.onNodeWithTag("continue-original").performClick()
+        assertEquals("attach", commands.single().first)
+        assertEquals("desktop-original", commands.single().second["threadId"].text())
+        compose.onNodeWithTag("message-input").performTextInput("继续检查")
+        compose.onNodeWithTag("send-message").performClick()
+        assertEquals("send", commands.last().first)
+        assertEquals("desktop-original", commands.last().second["threadId"].text())
+        compose.onNodeWithTag("session-mode").performClick()
+        compose.onNodeWithTag("continue-fork").performClick()
+        assertEquals("fork", commands.last().first)
+        assertEquals("desktop-original", commands.last().second["threadId"].text())
+    }
+
+    @Test
+    fun sidebarSwitchingPreservesSeparateDraftsAndSearchesLocally() {
+        val first =
+            WorkThread(
+                "alpha",
+                "重构手机工作台",
+                "C:/Projects/launcher",
+                "idle",
+                "managed",
+                0,
+                "Codex",
+                "appServer",
+            )
+        val second =
+            WorkThread(
+                "beta",
+                "检查配置同步",
+                "C:/Projects/website",
+                "idle",
+                "attach",
+                0,
+                "Codex",
+                "desktop",
+            )
+        val state =
+            mutableStateOf(
+                fixture()
+                    .copy(
+                        workbench =
+                            WorkbenchState(
+                                threads = listOf(first, second),
+                                detail = ThreadDetail(first, emptyList()),
+                                streaming = true,
+                            )
+                    )
+            )
+        compose.setContent {
+            LauncherTheme(false) {
+                LauncherScreen(
+                    state.value,
+                    2000,
+                    actions =
+                        LauncherActions(
+                            openThread = { id ->
+                                state.value =
+                                    state.value.copy(
+                                        workbench =
+                                            state.value.workbench.copy(
+                                                detail =
+                                                    ThreadDetail(
+                                                        if (id == first.id) first else second,
+                                                        emptyList(),
+                                                    )
+                                            )
+                                    )
+                            }
+                        ),
+                )
+            }
+        }
+        compose.onNodeWithTag("tab-1").performClick()
+        compose.onNodeWithTag("message-input").performTextInput("先保存这段未发送的要求")
+        compose.onNodeWithTag("open-sidebar").performClick()
+        capture("sidebar-light")
+        compose.onNodeWithTag("drawer-search").performTextInput("配置")
+        compose.onNodeWithTag("thread-alpha").assertDoesNotExist()
+        compose.onNodeWithTag("thread-beta").performClick()
+        assertEquals(
+            "",
+            compose
+                .onNodeWithTag("message-input")
+                .fetchSemanticsNode()
+                .config[SemanticsProperties.EditableText]
+                .text,
+        )
+        compose.onNodeWithTag("message-input").performTextInput("另一个项目的草稿")
+        compose.onNodeWithTag("open-sidebar").performClick()
+        compose.onNodeWithTag("drawer-search").performTextReplacement("")
+        compose.onNodeWithTag("thread-alpha").performClick()
+        compose.onNodeWithTag("message-input").assertTextEquals("先保存这段未发送的要求")
+        compose.onNodeWithTag("open-sidebar").performClick()
+        compose.onNodeWithTag("thread-beta").performClick()
+        compose.onNodeWithTag("message-input").assertTextEquals("另一个项目的草稿")
+    }
+
+    @Test
+    fun cancelledSettingEditsNeverBecomeAPcPatchAndInvalidNumbersCannotCommit() {
+        val configuration =
+            ConfigurationEnvelope(
+                "r1",
+                buildJsonObject {
+                    put("interval", 2.0)
+                    put("keepAlive", true)
+                },
+            )
+        var saved: JsonObject? = null
+        compose.setContent {
+            LauncherTheme(false) {
+                ConfigurationPage(
+                    fixture().copy(configuration = configuration),
+                    true,
+                    LauncherActions(saveConfiguration = { _, patch -> saved = patch }),
+                )
+            }
+        }
+        compose.onNodeWithText("保存到 PC").assertIsNotEnabled()
+        compose.onNodeWithTag("config-interval").performClick()
+        compose.onNodeWithTag("config-input-interval").performTextReplacement("NaN")
+        compose.onNodeWithTag("sheet-save-重试间隔（秒）").assertIsNotEnabled()
+        compose.onNodeWithTag("sheet-cancel-重试间隔（秒）").performClick()
+        compose.onNodeWithText("保存到 PC").assertIsNotEnabled()
+        compose.onNodeWithTag("config-interval").performClick()
+        compose.onNodeWithTag("config-input-interval").assertTextContains("2.0")
+        compose.onNodeWithTag("config-input-interval").performTextReplacement("3.5")
+        compose.onNodeWithTag("sheet-save-重试间隔（秒）").assertIsNotEnabled()
+        compose.onNodeWithTag("config-input-interval").performTextReplacement("3")
+        compose.onNodeWithTag("sheet-save-重试间隔（秒）").performClick()
+        compose.onNodeWithText("保存到 PC").performClick()
+        assertEquals(setOf("interval"), saved?.keys)
+        assertEquals("3", saved?.get("interval").text())
     }
 }

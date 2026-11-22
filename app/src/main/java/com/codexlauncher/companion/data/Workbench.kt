@@ -52,6 +52,9 @@ data class WorkThread(
     val provider: String,
     val source: String,
 ) {
+    val canContinueOriginal: Boolean
+        get() = control in setOf("managed", "attach")
+
     val project: String
         get() = cwd.replace('\\', '/').trimEnd('/').substringAfterLast('/').ifBlank { "未命名项目" }
 
