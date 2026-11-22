@@ -506,6 +506,12 @@ fun statusTitle(status: String) =
         "pausing" -> "正在暂停"
         "cancelling" -> "正在取消"
         "waitingForApproval" -> "等待确认"
+        "sending" -> "正在发送"
+        "sent" -> "已发送"
+        "unconfirmed" -> "待核对"
+        "notSent" -> "未发送"
+        "retrying" -> "连接重试中"
+        "compacting" -> "整理上下文"
         "interrupted" -> "已中断"
         "failed",
         "error",

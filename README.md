@@ -42,6 +42,8 @@ The desktop gateway uses the official Codex App Server protocol. It attempts a s
 - CODEX_HOME, the executable, project path, and shared socket are configurable.
 - An old session may require restoring its original provider before it can continue.
 
+Submitted messages are displayed immediately and reconciled using the server's client message ID. Pending text stays visible across refreshes, navigation, and background/foreground transitions while this app process remains alive. Long-context compaction and temporary upstream retries have separate progress indicators; a retry does not mean the turn has failed. Unconfirmed commands are never automatically replayed with a new request ID.
+
 ## Build
 
 Use JDK 21, Android SDK 35, and Build Tools 35.0.0:

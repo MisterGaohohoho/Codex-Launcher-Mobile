@@ -11,6 +11,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.unit.Density
@@ -469,5 +470,148 @@ class CompanionUiTest {
         compose.onNodeWithText("确认").performClick()
         assertEquals("fork", action)
         capture("workbench-readonly-light")
+    }
+
+    @Test
+    fun forkChatKeepsSentTextVisibleDuringCompactionAndTransientRetry() {
+        val thread =
+            WorkThread(
+                "fork",
+                "继续开发移动端",
+                "C:/Projects/launcher",
+                "idle",
+                "managed",
+                0,
+                "Codex",
+                "appServer",
+            )
+        val older = (1..8).map { WorkItem("old-$it", "old-turn", "userMessage", "你", "已有上下文 $it") }
+        val state =
+            mutableStateOf(
+                fixture()
+                    .copy(
+                        workbench =
+                            WorkbenchState(detail = ThreadDetail(thread, older), streaming = true)
+                    )
+            )
+        val dark = mutableStateOf(false)
+        val outgoing = OutgoingMessages()
+        var submitted: AdminCommand? = null
+        val text = "继续检查分支会话的消息显示"
+        fun event(value: String) {
+            val detail =
+                applyWorkbenchEvent(
+                    state.value.workbench.detail!!,
+                    WireJson.parseToJsonElement(value).obj(),
+                )
+            state.value =
+                state.value.copy(
+                    workbench = state.value.workbench.copy(detail = outgoing.decorate(detail))
+                )
+        }
+        compose.setContent {
+            LauncherTheme(dark.value) {
+                LauncherScreen(
+                    state.value,
+                    2000,
+                    actions =
+                        LauncherActions(
+                            workbenchAction = { action, input ->
+                                val request = AdminCommand("receipt", "workbench.$action", input)
+                                submitted = request
+                                outgoing.begin(request)
+                                state.value =
+                                    state.value.copy(
+                                        busy = true,
+                                        workbench =
+                                            state.value.workbench.copy(
+                                                detail =
+                                                    outgoing.decorate(
+                                                        state.value.workbench.detail!!
+                                                    )
+                                            ),
+                                    )
+                            }
+                        ),
+                )
+            }
+        }
+        compose.onNodeWithTag("tab-1").performClick()
+        compose.onNodeWithTag("thread-timeline").performScrollToIndex(0)
+        compose.onNodeWithTag("message-input").performTextInput(text)
+        compose.onNodeWithTag("send-message").performClick()
+        compose.onNodeWithText("正在发送").assertIsDisplayed()
+        compose
+            .onNode(hasText(text) and hasAnyAncestor(hasTestTag("thread-timeline")))
+            .assertIsDisplayed()
+        compose.runOnIdle {
+            event(
+                """{"method":"turn/started","params":{"threadId":"fork","turn":{"id":"turn1"}}}"""
+            )
+            event(
+                """{"method":"item/started","params":{"threadId":"fork","turnId":"turn1","item":{"id":"compact","type":"contextCompaction"}}}"""
+            )
+        }
+        compose.onNodeWithText("正在整理上下文，随后处理消息").assertIsDisplayed()
+        capture("workbench-compacting-light")
+        compose.runOnIdle {
+            val request = submitted!!
+            val result = buildJsonObject { put("turn", buildJsonObject { put("id", "turn1") }) }
+            outgoing.settle(request, "sent", result)
+            state.value =
+                state.value.copy(
+                    busy = false,
+                    lastAdminOutcome =
+                        AdminOutcome(
+                            "receipt",
+                            "workbench.send",
+                            "",
+                            result,
+                            request.input["messageId"].text(),
+                        ),
+                    workbench =
+                        state.value.workbench.copy(
+                            detail = outgoing.decorate(state.value.workbench.detail!!)
+                        ),
+                )
+        }
+        assertEquals(
+            "",
+            compose
+                .onNodeWithTag("message-input")
+                .fetchSemanticsNode()
+                .config[SemanticsProperties.EditableText]
+                .text,
+        )
+        compose.onAllNodesWithText(text).assertCountEquals(1)
+        compose.onNodeWithText("已发送").assertIsDisplayed()
+        compose.runOnIdle {
+            dark.value = true
+            event(
+                """{"method":"error","params":{"threadId":"fork","turnId":"turn1","willRetry":true,"error":{"message":"Reconnecting… 1/5"}}}"""
+            )
+        }
+        compose.onNodeWithText("连接重试中，任务仍在继续").assertIsDisplayed()
+        compose.onNodeWithText("执行失败").assertDoesNotExist()
+        compose.onNodeWithText("Reconnecting… 1/5").assertIsDisplayed()
+        capture("workbench-retry-dark")
+        compose.runOnIdle {
+            val clientId = submitted!!.input["messageId"].text()
+            event(
+                """{"method":"item/completed","params":{"threadId":"fork","turnId":"turn1","item":{"id":"compact","type":"contextCompaction"}}}"""
+            )
+            event(
+                """{"method":"item/completed","params":{"threadId":"fork","turnId":"turn1","item":{"id":"server-user","clientId":"$clientId","type":"userMessage","content":[{"type":"text","text":"$text"}]}}}"""
+            )
+            event(
+                """{"method":"turn/completed","params":{"threadId":"fork","turn":{"id":"turn1","status":"completed","items":[{"id":"answer","type":"agentMessage","text":"已完成分支会话检查。"}]}}}"""
+            )
+        }
+        compose.onNodeWithText("已就绪").assertIsDisplayed()
+        compose.onNodeWithText("Reconnecting… 1/5").assertDoesNotExist()
+        compose.onNodeWithText("停止").assertDoesNotExist()
+        compose.onNodeWithTag("thread-timeline").performScrollToNode(hasText(text))
+        compose.onAllNodesWithText(text).assertCountEquals(1)
+        assertFalse(state.value.workbench.detail!!.items.any { it.localEcho })
     }
 }

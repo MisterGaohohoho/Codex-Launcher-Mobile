@@ -157,6 +157,146 @@ class WorkbenchDataTest {
     }
 
     @Test
+    fun retryNotificationKeepsTheTurnActiveAndDisappearsWhenOutputResumes() {
+        val active = ThreadDetail(thread.copy(status = "active"), emptyList(), activeTurn = "turn1")
+        val retrying =
+            applyWorkbenchEvent(
+                active,
+                json(
+                    """{"method":"error","params":{"threadId":"fixture","turnId":"turn1","willRetry":true,"error":{"message":"Reconnecting… 1/5","additionalDetails":"Temporary upstream disconnect"}}}"""
+                ),
+            )
+        assertEquals("turn1", retrying.activeTurn)
+        assertEquals("active", retrying.thread.status)
+        assertEquals("retry", retrying.items.single().kind)
+        assertEquals("retrying", retrying.items.single().status)
+        assertTrue(retrying.items.single().text.contains("1/5"))
+        val working =
+            applyWorkbenchEvent(
+                retrying,
+                json(
+                    """{"method":"item/agentMessage/delta","params":{"threadId":"fixture","turnId":"turn1","itemId":"reply","delta":"Connection recovered"}}"""
+                ),
+            )
+        assertEquals("agentMessage", working.items.single().kind)
+        assertEquals("Connection recovered", working.items.single().text)
+    }
+
+    @Test
+    fun retryCompletionAndHistoryRefreshDoNotLeaveAFailureCard() {
+        val active = ThreadDetail(thread.copy(status = "active"), emptyList(), activeTurn = "turn1")
+        val retrying =
+            applyWorkbenchEvent(
+                active,
+                json(
+                    """{"method":"error","params":{"threadId":"fixture","turnId":"turn1","willRetry":true,"error":{"message":"Reconnecting… 1/5"}}}"""
+                ),
+            )
+        val completed =
+            applyWorkbenchEvent(
+                retrying,
+                json(
+                    """{"method":"turn/completed","params":{"threadId":"fixture","turn":{"id":"turn1","status":"completed","items":[{"id":"reply","type":"agentMessage","text":"Done"}],"error":{"message":"Previous retry"}}}}"""
+                ),
+            )
+        assertNull(completed.activeTurn)
+        assertEquals("idle", completed.thread.status)
+        assertEquals(listOf("agentMessage"), completed.items.map { it.kind })
+        val fresh =
+            ThreadDetail.parse(
+                json(
+                    """{"thread":{"id":"fixture"},"turnsPage":{"data":[{"id":"turn1","status":"completed","error":{"message":"Previous retry"},"items":[]}]}}"""
+                )
+            )
+        assertTrue(fresh.items.isEmpty())
+        assertTrue(mergeThreadRefresh(fresh, retrying).items.isEmpty())
+    }
+
+    @Test
+    fun realTurnFailuresRemainVisibleAndLateCompletionDoesNotStopTheNextTurn() {
+        val active = ThreadDetail(thread.copy(status = "active"), emptyList(), activeTurn = "turn2")
+        val terminal =
+            applyWorkbenchEvent(
+                active,
+                json(
+                    """{"method":"error","params":{"threadId":"fixture","turnId":"turn1","willRetry":false,"error":{"message":"Provider rejected request"}}}"""
+                ),
+            )
+        assertEquals("error", terminal.items.single().kind)
+        val oldComplete =
+            applyWorkbenchEvent(
+                terminal,
+                json(
+                    """{"method":"turn/completed","params":{"threadId":"fixture","turn":{"id":"turn1","status":"failed","error":{"message":"Provider rejected request"}}}}"""
+                ),
+            )
+        assertEquals("turn2", oldComplete.activeTurn)
+        assertEquals("active", oldComplete.thread.status)
+        assertEquals(1, oldComplete.items.size)
+        val failed =
+            applyWorkbenchEvent(
+                oldComplete,
+                json(
+                    """{"method":"turn/completed","params":{"threadId":"fixture","turn":{"id":"turn2","status":"failed","error":{"message":"Retry limit reached"}}}}"""
+                ),
+            )
+        assertNull(failed.activeTurn)
+        assertEquals("failed", failed.thread.status)
+        assertEquals("Retry limit reached", failed.items.last().text)
+        val history =
+            ThreadDetail.parse(
+                json(
+                    """{"thread":{"id":"fixture"},"turnsPage":{"data":[{"id":"turn2","status":"failed","error":{"message":"Retry limit reached"},"items":[]}]}}"""
+                )
+            )
+        assertEquals("failed", history.items.single().status)
+    }
+
+    @Test
+    fun compactionShowsProgressAndInterruptDoesNotLeaveItRunning() {
+        val active = ThreadDetail(thread, emptyList(), activeTurn = "turn1")
+        val compacting =
+            applyWorkbenchEvent(
+                active,
+                json(
+                    """{"method":"item/started","params":{"threadId":"fixture","turnId":"turn1","item":{"id":"compact","type":"contextCompaction"}}}"""
+                ),
+            )
+        assertEquals("inProgress", compacting.items.single().status)
+        val interrupted =
+            applyWorkbenchEvent(
+                compacting,
+                json(
+                    """{"method":"turn/completed","params":{"threadId":"fixture","turn":{"id":"turn1","status":"interrupted"}}}"""
+                ),
+            )
+        assertEquals("interrupted", interrupted.items.single().status)
+        assertFalse(interrupted.items.single().text.contains("正在"))
+        val completed =
+            applyWorkbenchEvent(
+                compacting,
+                json(
+                    """{"method":"item/completed","params":{"threadId":"fixture","turnId":"turn1","item":{"id":"compact","type":"contextCompaction"}}}"""
+                ),
+            )
+        assertEquals("completed", completed.items.single().status)
+    }
+
+    @Test
+    fun hiddenReasoningProgressClearsRetryWithoutDisplayingReasoning() {
+        val retry =
+            WorkItem("retry-turn1", "turn1", "retry", "Retrying", "Reconnecting", "retrying")
+        val detail = ThreadDetail(thread, listOf(retry), activeTurn = "turn1")
+        for (event in
+            listOf(
+                """{"method":"item/started","params":{"threadId":"fixture","turnId":"turn1","item":{"id":"reason","type":"reasoning"}}}""",
+                """{"method":"item/reasoning/textDelta","params":{"threadId":"fixture","turnId":"turn1","itemId":"reason","delta":"private"}}""",
+            )) {
+            assertTrue(applyWorkbenchEvent(detail, json(event)).items.isEmpty())
+        }
+    }
+
+    @Test
     fun configurationPatchPreservesUnchangedSecretsAndNestedSiblings() {
         val base =
             json(

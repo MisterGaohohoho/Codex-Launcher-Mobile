@@ -92,6 +92,7 @@ constructor(
     private var adminQueryJob: Job? = null
     private var latestAdminQuery: Pair<String, JsonObject>? = null
     private val updater = AppUpdater(application)
+    private val outgoingMessages = OutgoingMessages()
 
     private val initialization = viewModelScope.launch {
         try {
@@ -420,6 +421,7 @@ constructor(
     }
 
     private fun resetWorkbenchJobs() {
+        outgoingMessages.clear()
         streamJob?.cancel()
         streamJob = null
         workbenchJob?.cancel()
@@ -454,7 +456,9 @@ constructor(
                                         approvals = batch.approvals,
                                         detail =
                                             state.workbench.detail?.let { detail ->
-                                                batch.events.fold(detail, ::applyWorkbenchEvent)
+                                                outgoingMessages.decorate(
+                                                    batch.events.fold(detail, ::applyWorkbenchEvent)
+                                                )
                                             },
                                     )
                             )
@@ -596,7 +600,7 @@ constructor(
                     it.copy(
                         workbench =
                             it.workbench.copy(
-                                detail = detail,
+                                detail = outgoingMessages.decorate(detail),
                                 approvals =
                                     result["events"].obj()["approvals"].list().map { a -> a.obj() },
                                 error = null,
@@ -785,13 +789,29 @@ constructor(
             mutable.update { it.copy(notice = "请先核对上一项操作的结果") }
             return
         }
-        mutable.update { it.copy(busy = true, adminError = null, uncertainCommand = null) }
+        outgoingMessages.begin(request)
+        mutable.update {
+            it.copy(
+                busy = true,
+                adminError = null,
+                uncertainCommand = null,
+                workbench =
+                    it.workbench.copy(
+                        detail = it.workbench.detail?.let(outgoingMessages::decorate)
+                    ),
+            )
+        }
         viewModelScope.launch {
             try {
                 val result = source.command(request)
                 if (source === api) {
+                    outgoingMessages.settle(request, "sent", result)
                     mutable.update {
                         it.copy(
+                            workbench =
+                                it.workbench.copy(
+                                    detail = it.workbench.detail?.let(outgoingMessages::decorate)
+                                ),
                             notice = result["message"].text("操作已完成"),
                             lastAdminOutcome =
                                 AdminOutcome(
@@ -830,8 +850,14 @@ constructor(
                 throw e
             } catch (e: Exception) {
                 val uncertain = e !is ApiException
+                if (source !== api) return@launch
+                outgoingMessages.settle(request, if (uncertain) "unconfirmed" else "notSent")
                 mutable.update {
                     it.copy(
+                        workbench =
+                            it.workbench.copy(
+                                detail = it.workbench.detail?.let(outgoingMessages::decorate)
+                            ),
                         adminError = e.message,
                         notice = if (uncertain) "尚未确认结果，可重试同一请求核对；请勿重复创建任务" else e.message,
                         uncertainCommand = if (uncertain) request else null,

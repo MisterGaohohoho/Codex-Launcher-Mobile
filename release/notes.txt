@@ -1,0 +1,5 @@
+Fixes missing outgoing messages when continuing a forked session. Submitted text appears immediately and remains visible while the PC compacts context, reconnects, or waits for a response.
+
+Adds delivery states and context-compaction progress. Temporary upstream retries no longer appear as execution failures, and confirmed server messages replace local copies without duplicates.
+
+Compatible with Launcher desktop 2.8.0-beta.1. No desktop reinstall or new pairing is required.

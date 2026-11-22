@@ -266,6 +266,16 @@ fun WorkbenchDetailPage(
     var rename by remember { mutableStateOf(false) }
     var selectedApproval by remember { mutableStateOf<JsonObject?>(null) }
     val readOnly = detail.thread.control == "readOnly"
+    val activeItems =
+        detail.items.filter { detail.activeTurn != null && it.turnId == detail.activeTurn }
+    val retrying = activeItems.any { it.kind == "retry" }
+    val compacting = activeItems.any { it.kind == "contextCompaction" && it.status == "inProgress" }
+    val activityStatus =
+        when {
+            retrying -> "retrying"
+            compacting -> "compacting"
+            else -> detail.thread.status
+        }
     val approvals =
         state.workbench.approvals.filter {
             it["params"].obj()["threadId"].text() == detail.thread.id
@@ -340,7 +350,7 @@ fun WorkbenchDetailPage(
                     Modifier.weight(1f),
                     style = MaterialTheme.typography.labelMedium,
                 )
-                StatusLabel(statusTitle(detail.thread.status), detail.thread.status == "active")
+                StatusLabel(statusTitle(activityStatus), detail.activeTurn != null)
                 IconButton(onClick = { actions.openThread(detail.thread.id) }) {
                     Icon(Icons.Outlined.Refresh, "刷新当前会话")
                 }
@@ -371,7 +381,16 @@ fun WorkbenchDetailPage(
         val visible =
             detail.items.filter { item ->
                 when (tab) {
-                    0 -> item.kind in listOf("userMessage", "agentMessage", "plan", "error")
+                    0 ->
+                        item.kind in
+                            listOf(
+                                "userMessage",
+                                "agentMessage",
+                                "plan",
+                                "error",
+                                "retry",
+                                "contextCompaction",
+                            )
                     1 -> item.kind !in listOf("userMessage", "agentMessage", "fileChange", "plan")
                     else -> item.kind == "fileChange"
                 }
@@ -384,9 +403,16 @@ fun WorkbenchDetailPage(
                 } ?: true
             }
         }
-        LaunchedEffect(visible.size, visible.lastOrNull()?.text?.length) {
-            if (nearEnd && scroll.layoutInfo.totalItemsCount > 0)
-                scroll.scrollToItem(scroll.layoutInfo.totalItemsCount - 1)
+        val leadingRows =
+            (if (detail.nextCursor != null) 1 else 0) + (if (state.workbench.loading) 1 else 0)
+        LaunchedEffect(visible.size, visible.lastOrNull()?.text?.length, leadingRows) {
+            if (nearEnd && visible.isNotEmpty())
+                scroll.scrollToItem(leadingRows + visible.lastIndex)
+        }
+        val outgoingId = visible.lastOrNull { it.localEcho }?.id
+        LaunchedEffect(outgoingId) {
+            if (outgoingId != null)
+                scroll.scrollToItem(leadingRows + visible.indexOfFirst { it.id == outgoingId })
         }
         LazyColumn(
             Modifier.weight(1f).fillMaxWidth().testTag("thread-timeline"),
@@ -463,7 +489,11 @@ fun WorkbenchDetailPage(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
-                                "正在执行，可补充要求",
+                                when {
+                                    retrying -> "连接重试中，任务仍在继续"
+                                    compacting -> "正在整理上下文，随后处理消息"
+                                    else -> "正在执行，可补充要求"
+                                },
                                 Modifier.weight(1f),
                                 style = MaterialTheme.typography.labelMedium,
                             )

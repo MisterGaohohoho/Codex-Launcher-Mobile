@@ -1,6 +1,6 @@
 # Release operations
 
-1. Update `versionName` and increment `versionCode` in `app/build.gradle.kts`.
+1. Update `versionName` and increment `versionCode` in `app/build.gradle.kts`. Update `release/notes.txt`; the APK manifest and GitHub release use the same notes.
 2. Run tests, lint, a signed build, and review the light/dark and large-text screenshots.
 3. Push the matching `vVERSION` tag. **Release APK** publishes `launcher-mobile.apk`, `update-manifest.json`, and `SHA256SUMS`.
 4. The Worker reads the latest GitHub release using a short cache lifetime. APKs do not need separate Cloudflare storage.

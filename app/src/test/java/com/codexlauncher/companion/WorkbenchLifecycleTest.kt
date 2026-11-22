@@ -69,6 +69,8 @@ class WorkbenchLifecycleTest {
         var executions = 0
         var loseFirstReply = false
         var historyGate: CompletableDeferred<Unit>? = null
+        var commandGate: CompletableDeferred<Unit>? = null
+        var threadHistory: JsonObject? = null
 
         override suspend fun pair(code: PairingCode, name: String): PairResponse = error("Unused")
 
@@ -108,16 +110,17 @@ class WorkbenchLifecycleTest {
                     }
                 "workbench-thread" -> {
                     historyGate?.let { withContext(NonCancellable) { it.await() } }
-                    buildJsonObject {
-                        put("control", "managed")
-                        put(
-                            "thread",
-                            buildJsonObject {
-                                put("id", input["threadId"]!!)
-                                put("turns", JsonArray(emptyList()))
-                            },
-                        )
-                    }
+                    threadHistory
+                        ?: buildJsonObject {
+                            put("control", "managed")
+                            put(
+                                "thread",
+                                buildJsonObject {
+                                    put("id", input["threadId"]!!)
+                                    put("turns", JsonArray(emptyList()))
+                                },
+                            )
+                        }
                 }
                 else -> JsonObject(emptyMap())
             }
@@ -131,8 +134,14 @@ class WorkbenchLifecycleTest {
                         put("message", "done")
                         if (request.action == "workbench.create")
                             put("thread", buildJsonObject { put("id", "created-fixture") })
+                        if (request.action == "workbench.fork")
+                            put("thread", buildJsonObject { put("id", "fork-fixture") })
+                        if (request.action == "workbench.send")
+                            put("turn", buildJsonObject { put("id", "turn-fixture") })
+                        if (request.action == "workbench.steer") put("turnId", "turn-fixture")
                     }
                 }
+            commandGate?.await()
             if (loseFirstReply && requests.size == 1) throw IOException("reply lost after commit")
             return receipt
         }
@@ -211,5 +220,100 @@ class WorkbenchLifecycleTest {
         model.retryUncertainCommand()
         assertEquals(1, api.executions)
         assertEquals("created-fixture", model.state.value.workbench.detail?.thread?.id)
+    }
+
+    private fun json(value: String) = WireJson.parseToJsonElement(value).obj()
+
+    @Test
+    fun forkMessageIsVisibleDuringCompactionBeforeItsCommandReplyAndAfterReopening() = runBlocking {
+        val api = FakeApi()
+        val model = model(api)
+        model.workbenchAction("fork", buildJsonObject { put("threadId", "original") })
+        assertEquals("fork-fixture", model.state.value.workbench.detail?.thread?.id)
+        api.commandGate = CompletableDeferred()
+        model.workbenchAction(
+            "send",
+            buildJsonObject {
+                put("threadId", "fork-fixture")
+                put("messageId", "client-fixture")
+                put("text", "Continue the fork")
+            },
+        )
+        assertTrue(model.state.value.busy)
+        assertEquals("sending", model.state.value.workbench.detail?.items?.single()?.status)
+        api.stream.emit(
+            StreamBatch(
+                events =
+                    listOf(
+                        json(
+                            """{"method":"turn/started","params":{"threadId":"fork-fixture","turn":{"id":"turn-fixture","items":[]}}}"""
+                        ),
+                        json(
+                            """{"method":"item/started","params":{"threadId":"fork-fixture","turnId":"turn-fixture","item":{"id":"compact","type":"contextCompaction"}}}"""
+                        ),
+                    )
+            )
+        )
+        assertEquals("Continue the fork", model.state.value.workbench.detail?.items?.first()?.text)
+        assertEquals("inProgress", model.state.value.workbench.detail?.items?.last()?.status)
+
+        api.threadHistory =
+            json(
+                """{"thread":{"id":"fork-fixture","status":{"type":"active"}},"control":"managed","activeTurnId":"turn-fixture","turnsPage":{"data":[]}}"""
+            )
+        api.commandGate!!.complete(Unit)
+        dispatcher.scheduler.runCurrent()
+        assertFalse(model.state.value.busy)
+        val sent = model.state.value.workbench.detail!!.items.single { it.kind == "userMessage" }
+        assertEquals("sent", sent.status)
+        assertEquals("turn-fixture", sent.turnId)
+        model.closeThread()
+        model.setForeground(false)
+        model.setForeground(true)
+        model.openThread("fork-fixture")
+        assertEquals(
+            sent,
+            model.state.value.workbench.detail!!.items.single { it.kind == "userMessage" },
+        )
+
+        api.stream.emit(
+            StreamBatch(
+                events =
+                    listOf(
+                        json(
+                            """{"method":"item/completed","params":{"threadId":"fork-fixture","turnId":"turn-fixture","item":{"id":"server-fixture","clientId":"client-fixture","type":"userMessage","content":[{"type":"text","text":"Continue the fork"}]}}}"""
+                        )
+                    )
+            )
+        )
+        assertEquals("server-fixture", model.state.value.workbench.detail!!.items.single().id)
+        assertFalse(model.state.value.workbench.detail!!.items.single().localEcho)
+    }
+
+    @Test
+    fun lostSendReplyKeepsOneVisibleMessageAndRetryUsesTheSameReceipt() {
+        val api = FakeApi()
+        api.loseFirstReply = true
+        val model = model(api)
+        model.openThread("fixture")
+        model.workbenchAction(
+            "send",
+            buildJsonObject {
+                put("threadId", "fixture")
+                put("messageId", "client-fixture")
+                put("text", "Please continue")
+            },
+        )
+        assertEquals("unconfirmed", model.state.value.workbench.detail!!.items.single().status)
+        assertNotNull(model.state.value.uncertainCommand)
+        model.closeThread()
+        model.openThread("fixture")
+        assertEquals("Please continue", model.state.value.workbench.detail!!.items.single().text)
+        assertEquals(1, api.requests.size)
+        model.retryUncertainCommand()
+        assertEquals(1, api.executions)
+        assertEquals(api.requests.first(), api.requests.last())
+        assertEquals("sent", model.state.value.workbench.detail!!.items.single().status)
+        assertNull(model.state.value.uncertainCommand)
     }
 }

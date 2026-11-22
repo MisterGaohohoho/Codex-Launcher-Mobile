@@ -15,13 +15,14 @@ const publicKey = createPublicKey(key);
 const trusted = (await readFile(resolve(root, "release/update-public-key.txt"), "utf8")).trim();
 if (publicKey.export({ type: "spki", format: "der" }).toString("base64") !== trusted) throw new Error("Update signing key does not match the key embedded in the APK");
 const apk = await readFile(apkPath);
+const releaseNotes = process.env.RELEASE_NOTES ?? (await readFile(resolve(root, "release/notes.txt"), "utf8")).trim();
 const repo = process.env.GITHUB_REPOSITORY ?? "MisterGaohohoho/Codex-Launcher-Mobile";
 if (!/^[\w-]+\/[\w.-]+$/.test(repo)) throw new Error("Invalid repository");
 const payload = Buffer.from(JSON.stringify({
   versionCode: build.versionCode, versionName: build.versionName,
   apkUrl: `https://github.com/${repo}/releases/download/v${build.versionName}/launcher-mobile.apk`,
   sha256: createHash("sha256").update(apk).digest("hex"), size: apk.length, minSdk: 26,
-  publishedAt: new Date().toISOString(), releaseNotes: process.env.RELEASE_NOTES ?? "Mobile workbench, live PC configuration, session control, and verified app updates.",
+  publishedAt: new Date().toISOString(), releaseNotes,
 }));
 const signature = sign("sha256", payload, key);
 if (!verify("sha256", payload, publicKey, signature)) throw new Error("Manifest signature self-check failed");

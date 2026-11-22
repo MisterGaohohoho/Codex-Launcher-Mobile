@@ -80,6 +80,8 @@ data class WorkItem(
     val text: String,
     val status: String = "",
     val hasMore: Boolean = false,
+    val clientId: String = "",
+    val localEcho: Boolean = false,
 ) {
     companion object {
         fun parse(item: JsonObject, turn: String): WorkItem? {
@@ -100,6 +102,7 @@ data class WorkItem(
                             c["path"].text() + "\n" + c["diff"].text()
                         }
                     "plan" -> item["text"].text()
+                    "contextCompaction" -> "历史上下文已整理。"
                     "mcpToolCall" ->
                         listOf(
                                 item["server"].text() + "/" + item["tool"].text(),
@@ -130,10 +133,12 @@ data class WorkItem(
                     "commandExecution" -> "执行命令"
                     "fileChange" -> "文件变更"
                     "plan" -> "开发计划"
+                    "contextCompaction" -> "整理上下文"
                     else -> kind
                 },
                 text,
                 item["status"].text(),
+                clientId = item["clientId"].text(),
             )
         }
     }
@@ -166,6 +171,7 @@ data class ThreadDetail(
                 val error = t["error"].obj()["message"].text()
                 if (
                     error.isBlank() ||
+                        t["status"].text() != "failed" ||
                         (itemPage != null &&
                             pagedItems.isNotEmpty() &&
                             pagedItems.none { it.turnId == id })
@@ -206,6 +212,24 @@ data class WorkbenchState(
     val archived: Boolean = false,
 )
 
+// Server item ids differ from the caller's clientUserMessageId. Replace the local
+// echo in place when the real user item arrives, including after compaction.
+fun upsertWorkItem(items: List<WorkItem>, item: WorkItem): List<WorkItem> {
+    val existing = items.indexOfFirst {
+        it.id == item.id ||
+            (it.kind == "userMessage" &&
+                item.kind == "userMessage" &&
+                item.clientId.isNotBlank() &&
+                it.clientId == item.clientId)
+    }
+    if (existing < 0) return items + item
+    if (item.localEcho && !items[existing].localEcho) return items
+    return items.toMutableList().apply { set(existing, item) }
+}
+
+private fun uniqueWorkItems(items: List<WorkItem>) =
+    items.fold(emptyList<WorkItem>(), ::upsertWorkItem)
+
 // A history request can finish after a newer stream delta. Preserve newer partial
 // output and loaded earlier pages, while completed server items remain authoritative.
 fun mergeThreadRefresh(fresh: ThreadDetail, live: ThreadDetail): ThreadDetail {
@@ -221,7 +245,10 @@ fun mergeThreadRefresh(fresh: ThreadDetail, live: ThreadDetail): ThreadDetail {
                 live.items.filter { it.turnId == fresh.activeTurn }
             else emptyList()
         return fresh.copy(
-            items = (fresh.items + active).distinctBy { it.id },
+            items =
+                uniqueWorkItems(fresh.items + active).filter {
+                    it.kind != "retry" || it.turnId == fresh.activeTurn
+                },
             diff = if (fresh.activeTurn == live.activeTurn) live.diff else fresh.diff,
         )
     }
@@ -239,7 +266,10 @@ fun mergeThreadRefresh(fresh: ThreadDetail, live: ThreadDetail): ThreadDetail {
             else item
         }
     return fresh.copy(
-        items = ordered,
+        items =
+            uniqueWorkItems(ordered).filter {
+                it.kind != "retry" || it.turnId == fresh.activeTurn
+            },
         nextCursor = if (earlier.isNotEmpty()) live.nextCursor else fresh.nextCursor,
         diff = fresh.diff.ifBlank { if (fresh.activeTurn == live.activeTurn) live.diff else "" },
     )
@@ -251,14 +281,66 @@ fun applyWorkbenchEvent(detail: ThreadDetail, event: JsonObject): ThreadDetail {
     val method = event["method"].text()
     val turn = params["turnId"].text(detail.activeTurn.orEmpty())
     return when (method) {
-        "turn/started" ->
+        "turn/started" -> {
+            val started = params["turn"].obj()
+            val id = started["id"].text()
             detail.copy(
-                activeTurn = params["turn"].obj()["id"].text(),
+                items =
+                    started["items"]
+                        .list()
+                        .mapNotNull { WorkItem.parse(it.obj(), id) }
+                        .fold(detail.items.filterNot { it.kind == "retry" }, ::upsertWorkItem),
+                activeTurn = id,
                 thread = detail.thread.copy(status = "active"),
                 diff = "",
             )
-        "turn/completed" ->
-            detail.copy(activeTurn = null, thread = detail.thread.copy(status = "idle"))
+        }
+        "turn/completed" -> {
+            val completed = params["turn"].obj()
+            val id = completed["id"].text()
+            val current = detail.activeTurn == null || detail.activeTurn == id
+            var items =
+                completed["items"]
+                    .list()
+                    .mapNotNull { WorkItem.parse(it.obj(), id) }
+                    .fold(
+                        detail.items.filterNot { it.kind == "retry" && it.turnId == id },
+                        ::upsertWorkItem,
+                    )
+                    .map {
+                        if (
+                            it.kind == "contextCompaction" &&
+                                it.turnId == id &&
+                                it.status == "inProgress"
+                        )
+                            if (completed["status"].text() == "completed")
+                                it.copy(status = "completed", text = "历史上下文已整理。")
+                            else it.copy(status = "interrupted", text = "上下文整理已中断。")
+                        else it
+                    }
+            val error = completed["error"].obj()["message"].text()
+            if (completed["status"].text() == "failed" && error.isNotBlank())
+                items =
+                    upsertWorkItem(
+                        items,
+                        WorkItem("error-$id", id, "error", "执行失败", error, "failed"),
+                    )
+            detail.copy(
+                items = items,
+                activeTurn = if (current) null else detail.activeTurn,
+                thread =
+                    if (current)
+                        detail.thread.copy(
+                            status =
+                                when (completed["status"].text()) {
+                                    "failed" -> "failed"
+                                    "interrupted" -> "interrupted"
+                                    else -> "idle"
+                                }
+                        )
+                    else detail.thread,
+            )
+        }
         "thread/status/changed" ->
             detail.copy(thread = detail.thread.copy(status = params["status"].obj()["type"].text()))
         "turn/diff/updated" -> detail.copy(diff = params["diff"].text())
@@ -279,28 +361,51 @@ fun applyWorkbenchEvent(detail: ThreadDetail, event: JsonObject): ThreadDetail {
                         WorkItem("plan-$turn", turn, "plan", "开发计划", text)
             )
         }
-        "error" ->
+        "error" -> {
+            val retry = params["willRetry"].text() == "true"
+            val error = params["error"].obj()
+            val message =
+                listOf(
+                        error["message"].text(params["message"].text()),
+                        error["additionalDetails"].text(),
+                    )
+                    .filter { it.isNotBlank() }
+                    .joinToString("\n\n")
             detail.copy(
                 items =
-                    detail.items.filterNot { it.id == "error-$turn" } +
+                    upsertWorkItem(
+                        detail.items.filterNot {
+                            !retry && it.kind == "retry" && it.turnId == turn
+                        },
                         WorkItem(
-                            "error-$turn",
+                            if (retry) "retry-$turn" else "error-$turn",
                             turn,
-                            "error",
-                            "执行失败",
-                            params["error"].obj()["message"].text(params["message"].text()),
-                            "failed",
-                        )
+                            if (retry) "retry" else "error",
+                            if (retry) "连接重试中" else "执行失败",
+                            message,
+                            if (retry) "retrying" else "failed",
+                        ),
+                    )
             )
+        }
         "item/started",
         "item/completed" -> {
-            val item = WorkItem.parse(params["item"].obj(), turn) ?: return detail
-            val existing = detail.items.indexOfFirst { it.id == item.id }
-            detail.copy(
-                items =
-                    if (existing < 0) detail.items + item
-                    else detail.items.toMutableList().apply { set(existing, item) }
-            )
+            val progressing =
+                detail.copy(
+                    items = detail.items.filterNot { it.kind == "retry" && it.turnId == turn }
+                )
+            var item = WorkItem.parse(params["item"].obj(), turn) ?: return progressing
+            if (item.kind == "contextCompaction")
+                item =
+                    item.copy(
+                        text =
+                            if (method == "item/started") "正在整理较长的历史上下文，完成后会处理你的消息。"
+                            else "历史上下文已整理。",
+                        status = if (method == "item/started") "inProgress" else "completed",
+                    )
+            if (item.kind == "agentMessage" && method == "item/completed")
+                item = item.copy(status = "completed")
+            progressing.copy(items = upsertWorkItem(progressing.items, item))
         }
         "item/agentMessage/delta",
         "item/commandExecution/outputDelta" -> {
@@ -312,12 +417,23 @@ fun applyWorkbenchEvent(detail: ThreadDetail, event: JsonObject): ThreadDetail {
                     ?: WorkItem(id, turn, kind, if (kind == "agentMessage") "Codex" else "执行命令", "")
             val item =
                 before.copy(text = (before.text + params["delta"].text()).takeLast(128 * 1024))
-            detail.copy(
-                items =
-                    if (existing < 0) detail.items + item
-                    else detail.items.toMutableList().apply { set(existing, item) }
-            )
+            detail
+                .copy(
+                    items =
+                        if (existing < 0) detail.items + item
+                        else detail.items.toMutableList().apply { set(existing, item) }
+                )
+                .let { next ->
+                    next.copy(
+                        items = next.items.filterNot { it.kind == "retry" && it.turnId == turn }
+                    )
+                }
         }
-        else -> detail
+        else ->
+            if (method.startsWith("item/reasoning/"))
+                detail.copy(
+                    items = detail.items.filterNot { it.kind == "retry" && it.turnId == turn }
+                )
+            else detail
     }
 }
