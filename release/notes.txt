@@ -1,9 +1,11 @@
-Redesigns the entire mobile interface with a neutral iOS-inspired light/dark theme, searchable conversation sidebar, compact navigation, floating composer, and native transitions.
+Adds image and file attachments: system Photos, Camera, and Files selection; private per-session drafts; resumable uploads; pure attachment messages; image previews; bounded text/code reading; and attachment history across branches.
 
-Adds explicit Continue original session and Create a branch choices. Original continuation preserves the thread ID when the PC gateway can control it. Independent history remains read-only with a connection-settings explanation. Unsent drafts are kept separately while switching conversations.
+Conversations now open directly to messages. Execution records and file changes move to the session menu. Tap the title or use the menu to rename a session; new sessions can be named during creation. Pull down to load earlier messages or refresh, with the manual history button retained. The current model appears beneath the conversation title.
 
-Replaces persistent configuration forms with grouped rows, switches, selection sheets, numeric steppers, and staged editors. Settings, providers, credentials, live controls, and request filters share the new layout. Configuration saves retain revision checking and submit only changed fields.
+The Run control card also displays the PC's resolved model name, including CLI command/configuration models and the model recorded for a running request.
 
-Retains message delivery states, context-compaction progress, retry handling, approval controls, the original icon, and the existing secure pairing and APK update protocols.
+Drafts and pending sends survive process restart. Uploads pause in the background and resume manually. A changed active turn requires confirmation; uncertain model commands are checked without automatic replay. The original icon, pairing credentials, permissions, and signed update mechanism are retained.
 
-Compatible with Launcher desktop 2.8.0-beta.1. No desktop reinstall or new pairing is required.
+Attachments and resolved Run models require Launcher desktop 2.8.0-beta.2 or later. Earlier desktops keep text conversations and existing controls; the attachment entry explains the required upgrade. Install the matching PC update when current tasks can safely stop; pairing does not change.
+
+This release implements the attachment M1 stage. PDF/Office parsing and OCR are not included; unsupported formats remain downloadable files with an explicit read status. Image understanding depends on the selected model/provider. Automated native UI, transport, storage, and isolated Codex integration checks are covered. Physical camera, device-specific background behavior, and on-device upgrade checks remain to be completed on a target phone.

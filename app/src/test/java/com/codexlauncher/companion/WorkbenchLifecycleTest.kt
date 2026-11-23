@@ -168,6 +168,16 @@ class WorkbenchLifecycleTest {
         return model
     }
 
+    private fun awaitState(model: CompanionViewModel, ready: (CompanionState) -> Boolean) =
+        runBlocking {
+            withTimeout(5000) {
+                while (!ready(model.state.value)) {
+                    dispatcher.scheduler.runCurrent()
+                    delay(5)
+                }
+            }
+        }
+
     @Test
     fun lateHistoryDoesNotReopenAClosedThreadAndBackgroundClearsStreaming() = runBlocking {
         val api = FakeApi()
@@ -223,6 +233,7 @@ class WorkbenchLifecycleTest {
         model.workbenchAction("create", buildJsonObject { put("cwd", "C:/Projects/fixture") })
         assertNull(model.state.value.workbench.detail)
         model.retryUncertainCommand()
+        awaitState(model) { it.workbench.detail?.thread?.id == "created-fixture" && !it.busy }
         assertEquals(1, api.executions)
         assertEquals("created-fixture", model.state.value.workbench.detail?.thread?.id)
     }
@@ -255,6 +266,9 @@ class WorkbenchLifecycleTest {
                 put("text", "Continue the fork")
             },
         )
+        awaitState(model) {
+            it.busy && it.workbench.detail?.items?.any { item -> item.localEcho } == true
+        }
         assertTrue(model.state.value.busy)
         assertEquals("sending", model.state.value.workbench.detail?.items?.single()?.status)
         api.stream.emit(
@@ -278,7 +292,7 @@ class WorkbenchLifecycleTest {
                 """{"thread":{"id":"fork-fixture","status":{"type":"active"}},"control":"managed","activeTurnId":"turn-fixture","turnsPage":{"data":[]}}"""
             )
         api.commandGate!!.complete(Unit)
-        dispatcher.scheduler.runCurrent()
+        awaitState(model) { !it.busy }
         assertFalse(model.state.value.busy)
         val sent = model.state.value.workbench.detail!!.items.single { it.kind == "userMessage" }
         assertEquals("sent", sent.status)
@@ -320,6 +334,7 @@ class WorkbenchLifecycleTest {
                 put("text", "Please continue")
             },
         )
+        awaitState(model) { !it.busy && it.uncertainCommand != null }
         assertEquals("unconfirmed", model.state.value.workbench.detail!!.items.single().status)
         assertNotNull(model.state.value.uncertainCommand)
         model.closeThread()
@@ -327,6 +342,9 @@ class WorkbenchLifecycleTest {
         assertEquals("Please continue", model.state.value.workbench.detail!!.items.single().text)
         assertEquals(1, api.requests.size)
         model.retryUncertainCommand()
+        awaitState(model) {
+            !it.busy && it.uncertainCommand == null && it.pendingMessages.isEmpty()
+        }
         assertEquals(1, api.executions)
         assertEquals(api.requests.first(), api.requests.last())
         assertEquals("sent", model.state.value.workbench.detail!!.items.single().status)

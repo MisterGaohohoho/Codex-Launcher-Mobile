@@ -122,6 +122,7 @@ fun CompanionApp(model: CompanionViewModel = viewModel()) {
             if (granted) launchScan() else cameraError = "相机权限未开启，也可以在下方粘贴配对内容。"
         }
     LauncherTheme(dark = dark) {
+        val attachmentPicker = rememberAttachmentPicker(model::importAttachments)
         LauncherScreen(
             state,
             now,
@@ -156,6 +157,14 @@ fun CompanionApp(model: CompanionViewModel = viewModel()) {
                     state.workbench.detail?.thread?.id?.let { model.openThread(it, older = true) }
                 },
                 workbenchAction = model::workbenchAction,
+                editDraft = model::editDraft,
+                importAttachments = model::importAttachments,
+                pickAttachment = attachmentPicker,
+                removeAttachment = model::removeAttachment,
+                resumeMessage = { id, accept -> model.resumeMessage(id, accept) },
+                pauseMessage = model::pauseMessage,
+                discardMessage = model::discardMessage,
+                loadAttachment = model::loadAttachment,
                 loadConfiguration = model::loadConfiguration,
                 saveConfiguration = model::saveConfiguration,
                 adminQuery = { resource, input -> model.adminQuery(resource, input) },

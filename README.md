@@ -6,7 +6,8 @@ The original Launcher icon is retained. The interface uses a neutral iOS-inspire
 
 <p>
   <img src="docs/screenshots/sidebar-light.png" width="220" alt="Searchable conversation sidebar" />
-  <img src="docs/screenshots/workbench-chat-light.png" width="220" alt="Live development conversation" />
+  <img src="docs/screenshots/conversation-clean-model-light.png" width="220" alt="Conversation with current model" />
+  <img src="docs/screenshots/conversation-attachment-draft-light.png" width="220" alt="Attachment draft above the composer" />
   <img src="docs/screenshots/configuration-fields-light.png" width="220" alt="Grouped PC configuration editor" />
 </p>
 
@@ -15,15 +16,16 @@ Screenshots are rendered from the native Compose UI using synthetic test data. S
 ## Features
 
 - **Overview:** PC connectivity, ANY acquisition and keep-alive status, pending approvals, and recent sessions.
-- **Workbench:** a searchable sidebar, original-session or branch selection, separate unsent drafts, AI replies, command output, file changes, follow-up messages, steering, interruption, and supported Codex approvals.
-- **Run:** start/stop, immediate keep-alive controls, request/response details, searchable logs, and revision-checked PC configuration.
+- **Workbench:** conversation-first layout, current model, session naming and renaming, pull-down history loading, a searchable sidebar, original-session or branch selection, AI replies, execution records and file changes in the session menu, steering, interruption, and supported Codex approvals.
+- **Attachments:** system photo/file pickers, camera import, private per-session drafts, resumable uploads, pure image/file messages, image previews, bounded text reading, and attachment history across branches. See [attachments](docs/attachments.md) for limits and supported content.
+- **Run:** start/stop, the PC's resolved model name, immediate keep-alive controls, request/response details, searchable logs, and revision-checked PC configuration.
 - **Settings:** providers, usage, billing, Windows scheduled tasks, maintenance jobs, credentials, workbench connections, appearance, and verified APK updates.
 
 Only the Android client, public protocol documentation, release automation, and update Worker are included. Desktop implementation and credentials remain private.
 
 ## Connect
 
-1. Run Launcher desktop **2.8.0-beta.1 or later** with companion API v2.
+1. Run Launcher desktop **2.8.0-beta.2 or later** for attachments and resolved run models; beta.1 remains compatible with text conversations and existing controls.
 2. Enable mobile connections on a LAN or Tailscale IPv4 address.
 3. Grant full management access for configuration and workbench controls.
 4. Scan the one-time QR code or paste its payload into the app.
@@ -43,7 +45,7 @@ The desktop gateway uses the official Codex App Server protocol. It attempts a s
 - CODEX_HOME, the executable, project path, and shared socket are configurable.
 - An old session may require restoring its original provider before it can continue.
 
-Submitted messages are displayed immediately and reconciled using the server's client message ID. Pending text stays visible across refreshes, navigation, and background/foreground transitions while this app process remains alive. Long-context compaction and temporary upstream retries have separate progress indicators; a retry does not mean the turn has failed. Unconfirmed commands are never automatically replayed with a new request ID.
+Submitted messages are reconciled using stable message IDs. Text/file drafts and pending submissions are stored in private app storage, separated by the paired PC, backend scope, and conversation. Uploads pause in the background and can be resumed manually. Long-context compaction and temporary upstream retries have separate progress indicators. Unconfirmed model commands are never automatically replayed with a new request ID, including after process restart.
 
 ## Build
 

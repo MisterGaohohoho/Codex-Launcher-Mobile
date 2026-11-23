@@ -181,6 +181,191 @@ class CompanionUiTest {
         }
     }
 
+    @Test
+    fun conversationDefaultsToChatShowsModelAndKeepsToolsInMenu() {
+        val thread =
+            WorkThread(
+                "fixture",
+                "为移动工作台添加图片与文件",
+                "C:/Projects/launcher",
+                "idle",
+                "managed",
+                1,
+                "provider-name",
+                "cli",
+                "gpt-5.4",
+            )
+        val detail =
+            ThreadDetail(
+                thread,
+                listOf(
+                    WorkItem("u", "turn", "userMessage", "你", "请根据截图优化会话页面布局。"),
+                    WorkItem(
+                        "a",
+                        "turn",
+                        "agentMessage",
+                        "Codex",
+                        "我会保留清晰的对话区域，把执行记录和文件变更收进会话菜单，并让附件紧邻输入框。",
+                    ),
+                    WorkItem(
+                        "c",
+                        "turn",
+                        "commandExecution",
+                        "执行命令",
+                        "npm test\nAll tests passed",
+                        "completed",
+                    ),
+                ),
+            )
+        compose.setContent {
+            LauncherTheme(false) {
+                LauncherScreen(fixture().copy(workbench = WorkbenchState(detail = detail)), 2000)
+            }
+        }
+        compose.onNodeWithTag("tab-1").performClick()
+        compose.onNodeWithText("gpt-5.4 · launcher").assertIsDisplayed()
+        compose.onNodeWithTag("thread-tab-1").assertDoesNotExist()
+        compose.onNodeWithText("npm test\nAll tests passed").assertDoesNotExist()
+        capture("conversation-clean-model-light")
+        compose.onNodeWithContentDescription("会话操作").performClick()
+        compose.onNodeWithTag("show-executions").performClick()
+        compose.onNodeWithText("npm test\nAll tests passed").assertIsDisplayed()
+        compose.onNodeWithTag("back-to-conversation").performClick()
+        compose.onNodeWithText("请根据截图优化会话页面布局。").assertIsDisplayed()
+    }
+
+    @Test
+    fun titleOpensRenameAndSendsTheSelectedSessionIdentity() {
+        val thread =
+            WorkThread(
+                "rename-me",
+                "新会话",
+                "C:/Projects/demo",
+                "idle",
+                "managed",
+                1,
+                "",
+                "cli",
+                "fixture-model",
+            )
+        var command: Pair<String, JsonObject>? = null
+        compose.setContent {
+            LauncherTheme(false) {
+                LauncherScreen(
+                    fixture()
+                        .copy(
+                            workbench = WorkbenchState(detail = ThreadDetail(thread, emptyList()))
+                        ),
+                    2000,
+                    actions =
+                        LauncherActions(
+                            workbenchAction = { action, input -> command = action to input }
+                        ),
+                )
+            }
+        }
+        compose.onNodeWithTag("tab-1").performClick()
+        compose.onNodeWithTag("conversation-title").performClick()
+        compose.onNodeWithTag("rename-thread-input").performTextReplacement("修复上传进度")
+        compose.onNodeWithTag("sheet-save-重命名会话").performClick()
+        assertEquals("rename", command?.first)
+        assertEquals("rename-me", command?.second?.get("threadId").text())
+        assertEquals("修复上传进度", command?.second?.get("name").text())
+    }
+
+    @Test
+    fun pullDownLoadsEarlierHistoryAndKeepsTheManualButton() {
+        val thread =
+            WorkThread("history", "历史加载", "C:/Projects/demo", "idle", "managed", 1, "", "cli")
+        var earlier = 0
+        compose.setContent {
+            LauncherTheme(false) {
+                WorkbenchDetailPage(
+                    fixture()
+                        .copy(
+                            workbench =
+                                WorkbenchState(
+                                    detail =
+                                        ThreadDetail(
+                                            thread,
+                                            listOf(
+                                                WorkItem(
+                                                    "message",
+                                                    "turn",
+                                                    "agentMessage",
+                                                    "Codex",
+                                                    "最近的一条回复",
+                                                )
+                                            ),
+                                            nextCursor = "page-2",
+                                        )
+                                )
+                        ),
+                    true,
+                    LauncherActions(olderMessages = { earlier++ }),
+                    confirm = {},
+                )
+            }
+        }
+        compose.onNodeWithTag("thread-timeline").performScrollToIndex(0)
+        compose.onNodeWithTag("thread-timeline").performTouchInput {
+            swipeDown(durationMillis = 400)
+        }
+        compose.waitForIdle()
+        assertEquals(1, earlier)
+        compose.onNodeWithText("加载更早记录").performClick()
+        assertEquals(2, earlier)
+    }
+
+    @Test
+    fun attachmentOnlyComposerCanSendAndAnOldPcShowsTheUpgradeExplanation() {
+        val thread =
+            WorkThread(
+                "files",
+                "发送附件",
+                "C:/Projects/demo",
+                "idle",
+                "managed",
+                1,
+                "",
+                "cli",
+                "fixture-model",
+            )
+        val detail = ThreadDetail(thread, emptyList(), backendScopeId = "scope")
+        val base = fixture()
+        val target = detail.draftTarget(base.computer)
+        val local =
+            LocalAttachment(
+                "00000000-0000-4000-8000-000000000010",
+                "error.log",
+                "text/plain",
+                256,
+                "a".repeat(64),
+            )
+        var command: JsonObject? = null
+        compose.setContent {
+            LauncherTheme(false) {
+                LauncherScreen(
+                    base.copy(
+                        workbench = WorkbenchState(detail = detail),
+                        attachmentDrafts =
+                            mapOf(target.key to ComposerDraft(target, attachments = listOf(local))),
+                    ),
+                    2000,
+                    actions = LauncherActions(workbenchAction = { _, input -> command = input }),
+                )
+            }
+        }
+        compose.onNodeWithTag("tab-1").performClick()
+        compose.onNodeWithText("error.log").assertIsDisplayed()
+        compose.onNodeWithTag("send-message").assertIsEnabled().performClick()
+        assertEquals("", command?.get("text").text())
+        assertEquals(local.id, command?.get("localAttachmentIds").list().single().text())
+        capture("conversation-attachment-draft-light")
+        compose.onNodeWithTag("add-attachment").performClick()
+        compose.onNodeWithText("图片和文件附件需要 PC 2.8.0-beta.2 或更新版本。文字聊天仍可使用。").assertIsDisplayed()
+    }
+
     private fun fixture() =
         CompanionState(
             computer =
@@ -217,7 +402,7 @@ class CompanionUiTest {
                     RunConfiguration(
                         provider = "Codex",
                         executionMode = "cli",
-                        model = "由电脑决定",
+                        model = "gpt-5.4",
                         concurrency = 6,
                         keepAliveEnabled = true,
                         contentMode = "ascii",
@@ -278,6 +463,8 @@ class CompanionUiTest {
         compose.onAllNodesWithText("保活中").assertCountEquals(1)
         capture("monitor-dark")
         compose.onNodeWithTag("tab-2").performClick()
+        compose.onNodeWithText("gpt-5.4").assertIsDisplayed()
+        capture("run-model-dark")
         compose.onNodeWithTag("run-tab-1").performClick()
         capture("processes-dark")
         compose.onNodeWithTag("worker-2").performClick()
@@ -471,7 +658,8 @@ class CompanionUiTest {
         assertEquals("answer", command?.first)
         assertEquals("connection1", command?.second?.get("epoch").text())
         assertEquals("decline", command?.second?.get("answer").obj()["decision"].text())
-        compose.onNodeWithTag("thread-tab-1").performClick()
+        compose.onNodeWithContentDescription("会话操作").performClick()
+        compose.onNodeWithTag("show-executions").performClick()
         compose.onNodeWithText("npm test\n\n2 tests passed").assertIsDisplayed()
         capture("workbench-execution-dark")
     }

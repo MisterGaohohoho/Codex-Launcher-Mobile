@@ -51,6 +51,7 @@ data class WorkThread(
     val updatedAt: Long,
     val provider: String,
     val source: String,
+    val model: String = "",
 ) {
     val canContinueOriginal: Boolean
         get() = control in setOf("managed", "attach")
@@ -71,10 +72,12 @@ data class WorkThread(
                 value["updatedAt"].text().toLongOrNull() ?: 0,
                 value["modelProvider"].text(),
                 value["source"].text("Codex"),
+                value["model"].text(),
             )
     }
 }
 
+@Serializable
 data class WorkItem(
     val id: String,
     val turnId: String,
@@ -85,6 +88,7 @@ data class WorkItem(
     val hasMore: Boolean = false,
     val clientId: String = "",
     val localEcho: Boolean = false,
+    val attachments: List<AttachmentMeta> = emptyList(),
 ) {
     companion object {
         fun parse(item: JsonObject, turn: String): WorkItem? {
@@ -93,7 +97,12 @@ data class WorkItem(
             val text =
                 when (kind) {
                     "userMessage" ->
-                        item["content"].list().joinToString("\n") { it.obj()["text"].text() }
+                        item["displayText"]?.text()
+                            ?: item["content"]
+                                .list()
+                                .map { it.obj()["text"].text() }
+                                .filter { it.isNotBlank() }
+                                .joinToString("\n")
                     "agentMessage" -> item["text"].text()
                     "commandExecution" ->
                         listOf(item["command"].text(), item["aggregatedOutput"].text())
@@ -142,6 +151,26 @@ data class WorkItem(
                 text,
                 item["status"].text(),
                 clientId = item["clientId"].text(),
+                attachments =
+                    item["attachments"]
+                        .list()
+                        .mapNotNull {
+                            runCatching { WireJson.decodeFromJsonElement<AttachmentMeta>(it) }
+                                .getOrNull()
+                        }
+                        .ifEmpty {
+                            item["content"].list().mapIndexedNotNull { index, value ->
+                                if (value.obj()["type"].text() in listOf("image", "localImage"))
+                                    AttachmentMeta(
+                                        "external-${item["id"].text()}-$index",
+                                        "PC 图片",
+                                        kind = "image",
+                                        readStatus = "unavailable",
+                                        readMessage = "此图片来自其他客户端，未登记到附件服务，手机暂不可预览",
+                                    )
+                                else null
+                            }
+                        },
             )
         }
     }
@@ -153,6 +182,7 @@ data class ThreadDetail(
     val activeTurn: String? = null,
     val nextCursor: String? = null,
     val diff: String = "",
+    val backendScopeId: String = "",
 ) {
     companion object {
         fun parse(value: JsonObject): ThreadDetail {
@@ -195,6 +225,7 @@ data class ThreadDetail(
                         ?.get("id")
                         ?.text(),
                 (itemPage ?: page)["nextCursor"].text().ifBlank { null },
+                backendScopeId = value["backendScopeId"].text(),
             )
         }
     }
@@ -284,6 +315,10 @@ fun applyWorkbenchEvent(detail: ThreadDetail, event: JsonObject): ThreadDetail {
     val method = event["method"].text()
     val turn = params["turnId"].text(detail.activeTurn.orEmpty())
     return when (method) {
+        "thread/name/updated" ->
+            detail.copy(
+                thread = detail.thread.copy(title = params["name"].text(detail.thread.title))
+            )
         "turn/started" -> {
             val started = params["turn"].obj()
             val id = started["id"].text()

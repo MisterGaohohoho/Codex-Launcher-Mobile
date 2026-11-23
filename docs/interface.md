@@ -1,6 +1,6 @@
 # Mobile interface
 
-The 0.3 interface is implemented with native Jetpack Compose components. Its neutral palette and floating composer take visual inspiration from [Cherry Studio Mobile](https://github.com/CherryHQ/cherry-studio-app). Its searchable, swipeable conversation sidebar takes interaction inspiration from [Galaxies' ChatGPT example](https://github.com/Galaxies-dev/chatgpt-clone-react-native). No application code or assets from those repositories are included.
+The 0.4 interface is implemented with native Jetpack Compose components. Its neutral palette and floating composer take visual inspiration from [Cherry Studio Mobile](https://github.com/CherryHQ/cherry-studio-app). Its searchable, swipeable conversation sidebar takes interaction inspiration from [Galaxies-dev's ChatGPT example](https://github.com/Galaxies-dev/chatgpt-clone-react-native). No application code or assets from those repositories are included.
 
 ## Navigation
 
@@ -13,6 +13,10 @@ The compact bottom navigation appears on the four main pages. Conversation and s
 
 ## Conversation controls
 
+Conversations open directly to messages. Execution records and file changes are available in the three-dot session menu, with a compact return-to-chat action. The subtitle prioritizes the current model before the project name.
+
+Tap the conversation title or choose Rename from the session menu. The sidebar's long-press sheet also offers Rename, and the new-session sheet accepts an optional name. Pull down at the top to load earlier history, or refresh when no earlier page remains; the explicit Load earlier button is retained. Prepending history preserves the reader's scroll anchor.
+
 The continuation sheet always distinguishes **Continue original session** and **Create a branch**.
 
 - The original option is enabled only for the gateway's `managed` and `attach` control states. It calls `workbench.attach` with the selected thread ID. Subsequent messages use that same ID.
@@ -21,7 +25,11 @@ The continuation sheet always distinguishes **Continue original session** and **
 - Independently owned history stays read-only. The original option explains that a compatible shared backend must be connected, and links to its connection settings. The app never silently substitutes a branch for the original option.
 - A successful attach selects the requested original session, including when it was chosen from the sidebar while a different conversation was open.
 
-Unsent composer drafts are stored separately for each visited conversation in Compose saved state. Delivery reconciliation, command receipts, interruption, approvals, compaction, retries, and the PC's permission policy continue to use the existing protocol.
+The composer's plus button offers Photos, Camera, and Files. Selected items appear above the input; tapping opens a preview or file details. Sending freezes the destination and content, so switching conversations during upload cannot redirect the message. A changed active turn requires explicit confirmation before changing from steering to a new turn. See [attachment behavior](attachments.md).
+
+Unsent text/file drafts and pending submissions are stored privately by PC fingerprint, backend scope, and thread. Delivery reconciliation, interruption, approvals, compaction, retries, and the PC's permission policy remain in effect.
+
+The Run control card displays the resolved CLI/HTTP model supplied by the PC. Active requests retain their recorded model when saved defaults change. When a wrapper script or unset default prevents reliable resolution, the PC returns an explicit unavailable/default label.
 
 ## Configuration
 

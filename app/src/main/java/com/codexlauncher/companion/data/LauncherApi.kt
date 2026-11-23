@@ -1,6 +1,7 @@
 package com.codexlauncher.companion.data
 
 import android.annotation.SuppressLint
+import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
 import java.security.cert.CertificateException
@@ -23,7 +24,7 @@ import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 
-class ApiException(val status: Int, message: String) : IOException(message)
+class ApiException(val status: Int, message: String, val code: String = "") : IOException(message)
 
 interface CompanionApi {
     suspend fun pair(code: PairingCode, name: String): PairResponse
@@ -45,6 +46,32 @@ interface CompanionApi {
         throw ApiException(404, "请更新 PC 端以使用此功能")
 
     fun events(epoch: String, since: Long): Flow<StreamBatch> = emptyFlow()
+
+    suspend fun createUpload(request: UploadRequest): AttachmentUpload =
+        throw ApiException(404, "请升级 PC 以使用附件")
+
+    suspend fun uploadStatus(id: String): AttachmentUpload = throw ApiException(404, "请升级 PC 以使用附件")
+
+    suspend fun uploadChunk(
+        id: String,
+        index: Int,
+        total: Long,
+        bytes: ByteArray,
+    ): AttachmentUpload = throw ApiException(404, "请升级 PC 以使用附件")
+
+    suspend fun completeUpload(id: String): AttachmentUpload =
+        throw ApiException(404, "请升级 PC 以使用附件")
+
+    suspend fun cancelUpload(id: String) {}
+
+    suspend fun downloadAttachment(
+        thread: String,
+        id: String,
+        preview: Boolean,
+        destination: File,
+    ) {
+        throw ApiException(404, "请升级 PC 以使用附件")
+    }
 
     fun close()
 }
@@ -252,6 +279,141 @@ class LauncherApi(endpoint: String, fingerprint: String, private val token: Stri
     override fun close() {
         client.dispatcher.cancelAll()
         client.connectionPool.evictAll()
+    }
+
+    private fun attachmentUrl(path: String): HttpUrl =
+        base.newBuilder().addPathSegments("api/v2/attachments/$path").build()
+
+    override suspend fun createUpload(request: UploadRequest): AttachmentUpload =
+        WireJson.decodeFromString(
+            send("POST", "", WireJson.encodeToString(request), attachmentUrl("uploads"))
+        )
+
+    override suspend fun uploadStatus(id: String): AttachmentUpload {
+        require(id.matches(Regex("[a-fA-F0-9-]{36}")))
+        return WireJson.decodeFromString(send("GET", "", url = attachmentUrl("uploads/$id")))
+    }
+
+    override suspend fun completeUpload(id: String): AttachmentUpload =
+        WireJson.decodeFromString(send("POST", "", "{}", attachmentUrl("uploads/$id/complete")))
+
+    override suspend fun cancelUpload(id: String) {
+        require(id.matches(Regex("[a-fA-F0-9-]{36}")))
+        send("DELETE", "", url = attachmentUrl("uploads/$id"))
+    }
+
+    override suspend fun uploadChunk(
+        id: String,
+        index: Int,
+        total: Long,
+        bytes: ByteArray,
+    ): AttachmentUpload {
+        require(
+            id.matches(Regex("[a-fA-F0-9-]{36}")) &&
+                index >= 0 &&
+                bytes.size in 1..ATTACHMENT_MIB.toInt()
+        )
+        val start = index.toLong() * ATTACHMENT_MIB
+        val request =
+            Request.Builder()
+                .url(attachmentUrl("uploads/$id/chunks/$index"))
+                .header("Authorization", "Bearer $token")
+                .header("Cache-Control", "no-store")
+                .header("Content-Range", "bytes $start-${start + bytes.size - 1}/$total")
+                .header("X-Chunk-SHA256", bytesSha256(bytes))
+                .put(bytes.toRequestBody("application/octet-stream".toMediaType()))
+                .build()
+        val response = transfer(request, ATTACHMENT_MIB)
+        return WireJson.decodeFromString(response.toString(Charsets.UTF_8))
+    }
+
+    override suspend fun downloadAttachment(
+        thread: String,
+        id: String,
+        preview: Boolean,
+        destination: File,
+    ) {
+        require(id.matches(Regex("att_[a-fA-F0-9-]{36}")))
+        val request =
+            Request.Builder()
+                .url(
+                    attachmentUrl("$id/${if (preview) "preview" else "content"}")
+                        .newBuilder()
+                        .addQueryParameter("threadId", thread)
+                        .build()
+                )
+                .header("Authorization", "Bearer $token")
+                .header("Cache-Control", "no-store")
+                .get()
+                .build()
+        transfer(request, if (preview) ATTACHMENT_MIB else 50 * ATTACHMENT_MIB, destination)
+    }
+
+    private suspend fun transfer(
+        request: Request,
+        limit: Long,
+        destination: File? = null,
+    ): ByteArray = suspendCancellableCoroutine { continuation ->
+        val call =
+            client
+                .newBuilder()
+                .readTimeout(45, TimeUnit.SECONDS)
+                .writeTimeout(45, TimeUnit.SECONDS)
+                .callTimeout(120, TimeUnit.SECONDS)
+                .build()
+                .newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(
+            object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(e)
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    try {
+                        response.use {
+                            val body = it.body ?: throw IOException("电脑返回了空响应")
+                            if (!it.isSuccessful) {
+                                val source = body.source()
+                                if (source.request(65537)) throw IOException("错误响应超过上限")
+                                val error = runCatching {
+                                    WireJson.parseToJsonElement(source.readUtf8()).obj()
+                                }
+                                    .getOrDefault(JsonObject(emptyMap()))
+                                throw ApiException(
+                                    it.code,
+                                    error["message"].text("附件传输失败 (${it.code})"),
+                                    error["code"].text(),
+                                )
+                            }
+                            if (body.contentLength() > limit) throw IOException("附件响应超过大小限制")
+                            val memory =
+                                if (destination == null) java.io.ByteArrayOutputStream() else null
+                            val output = destination?.outputStream() ?: memory!!
+                            output.use { sink ->
+                                body.byteStream().use { input ->
+                                    var total = 0L
+                                    val buffer = ByteArray(65536)
+                                    while (true) {
+                                        if (call.isCanceled()) throw IOException("附件传输已暂停")
+                                        val read = input.read(buffer)
+                                        if (read < 0) break
+                                        total += read
+                                        if (total > limit) throw IOException("附件响应超过大小限制")
+                                        sink.write(buffer, 0, read)
+                                    }
+                                }
+                            }
+                            if (continuation.isActive)
+                                continuation.resume(memory?.toByteArray() ?: byteArrayOf())
+                        }
+                    } catch (e: Exception) {
+                        destination?.delete()
+                        if (continuation.isActive) continuation.resumeWithException(e)
+                    }
+                }
+            }
+        )
     }
 
     private suspend fun send(

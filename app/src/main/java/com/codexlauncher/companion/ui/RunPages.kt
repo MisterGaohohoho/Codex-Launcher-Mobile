@@ -235,7 +235,7 @@ fun RunPage(
                                 )
                             }
                             RunControl(state, now, actions, confirm)
-                            KeyValue("模型", config?.model?.ifBlank { "使用 PC 配置" } ?: "等待同步")
+                            KeyValue("模型", config?.model?.ifBlank { "PC 未返回模型名称" } ?: "等待同步")
                             KeyValue(
                                 "并发进程",
                                 "${run?.activeWorkers ?: 0} / ${config?.concurrency ?: 0}",

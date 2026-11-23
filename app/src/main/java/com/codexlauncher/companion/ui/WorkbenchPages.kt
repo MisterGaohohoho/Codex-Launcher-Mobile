@@ -22,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -118,6 +119,7 @@ fun WorkbenchListPage(
     LaunchedEffect(workbench.search) { search = workbench.search }
     var create by rememberSaveable { mutableStateOf(false) }
     var contextThread by remember { mutableStateOf<WorkThread?>(null) }
+    var renameThread by remember { mutableStateOf<WorkThread?>(null) }
     val threads =
         workbench.threads.filter {
             search.isBlank() || it.title.contains(search, true) || it.project.contains(search, true)
@@ -225,6 +227,7 @@ fun WorkbenchListPage(
         }
     }
     if (create) NewThreadSheet(state, canControl, actions) { create = false }
+    renameThread?.let { RenameThreadSheet(it, canControl, actions) { renameThread = null } }
     contextThread?.let { thread ->
         SessionChoiceSheet(
             thread,
@@ -243,6 +246,10 @@ fun WorkbenchListPage(
                 contextThread = null
                 settings()
             },
+            rename = {
+                contextThread = null
+                renameThread = thread
+            },
         )
     }
 }
@@ -257,6 +264,13 @@ fun NewThreadSheet(
     val workbench = state.workbench
     var cwd by rememberSaveable { mutableStateOf(workbench.settings?.get("workDir").text()) }
     var model by rememberSaveable { mutableStateOf("") }
+    var name by rememberSaveable { mutableStateOf("") }
+    val newTarget =
+        DraftTarget(
+            state.computer?.certificateSha256.orEmpty(),
+            workbench.capabilities?.get("backendScopeId").text(),
+            "new",
+        )
     EditorSheet(
         "新建开发会话",
         dismiss,
@@ -265,12 +279,14 @@ fun NewThreadSheet(
                 "create",
                 buildJsonObject {
                     put("cwd", cwd.trim())
+                    if (name.isNotBlank()) put("name", name.trim())
+                    put("draftScopeId", newTarget.scope)
                     if (model.isNotBlank()) put("model", model.trim())
                 },
             )
             dismiss()
         },
-        saveEnabled = enabled && cwd.isNotBlank(),
+        saveEnabled = enabled && cwd.isNotBlank() && newTarget.key !in state.importingAttachments,
         saveLabel = "创建",
     ) {
         Text(
@@ -279,6 +295,15 @@ fun NewThreadSheet(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         SettingsGroup("项目") {
+            TextSetting(
+                "会话名称",
+                name,
+                "可选，稍后也能重命名",
+                multiline = false,
+                tag = "new-thread-name",
+                changed = { if (it.toByteArray().size <= 256) name = it },
+            )
+            SettingDivider()
             TextSetting(
                 "项目目录",
                 cwd,
@@ -312,6 +337,15 @@ fun NewThreadSheet(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AttachmentPickerButton(newTarget, state, actions, enabled = true)
+            Text(
+                "可先添加资料，创建后发送",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        ComposerAttachments(state, newTarget, actions) {}
     }
 }
 
@@ -323,6 +357,7 @@ fun SessionChoiceSheet(
     original: () -> Unit,
     branch: () -> Unit,
     connectionSettings: () -> Unit,
+    rename: (() -> Unit)? = null,
 ) {
     EditorSheet("选择继续方式", dismiss) {
         Text(thread.title, style = MaterialTheme.typography.titleMedium)
@@ -346,6 +381,16 @@ fun SessionChoiceSheet(
                 modifier = Modifier.testTag("continue-fork"),
                 onClick = branch,
             )
+            if (rename != null) {
+                SettingDivider()
+                SettingRow(
+                    "重命名会话",
+                    icon = Icons.Outlined.Edit,
+                    enabled = enabled && thread.canContinueOriginal,
+                    onClick = rename,
+                    modifier = Modifier.testTag("rename-thread-choice"),
+                )
+            }
         }
         if (!thread.canContinueOriginal)
             TextButton(onClick = connectionSettings, modifier = Modifier.fillMaxWidth()) {
@@ -371,8 +416,11 @@ fun WorkbenchDetailPage(
     confirm: (ConfirmAction) -> Unit,
 ) {
     val detail = state.workbench.detail ?: return
-    var tab by rememberSaveable(detail.thread.id) { mutableIntStateOf(0) }
-    var draft by rememberSaveable(detail.thread.id) { mutableStateOf("") }
+    val target = detail.draftTarget(state.computer)
+    val savedDraft = state.attachmentDrafts[target.key]
+    val draftAttachments = savedDraft?.attachments.orEmpty()
+    var tab by remember(detail.thread.id) { mutableIntStateOf(0) }
+    var draft by rememberSaveable(target.key) { mutableStateOf(savedDraft?.text.orEmpty()) }
     var submitted by rememberSaveable(detail.thread.id) { mutableStateOf<String?>(null) }
     var submittedId by rememberSaveable(detail.thread.id) { mutableStateOf<String?>(null) }
     var menu by remember { mutableStateOf(false) }
@@ -401,10 +449,21 @@ fun WorkbenchDetailPage(
             submittedId = null
         }
     }
+    LaunchedEffect(state.lastDraftSubmissionId) {
+        if (submittedId != null && state.lastDraftSubmissionId == submittedId) {
+            if (draft == submitted) draft = ""
+            submitted = null
+            submittedId = null
+        }
+    }
     val canSend =
         canControl &&
             !readOnly &&
-            draft.isNotBlank() &&
+            (draft.isNotBlank() || draftAttachments.isNotEmpty()) &&
+            target.key !in state.importingAttachments &&
+            state.pendingMessages.values.none {
+                it.target == target && it.state !in listOf("sent", "discarded")
+            } &&
             !state.workbench.loading &&
             state.uncertainCommand == null
     val send = {
@@ -417,6 +476,11 @@ fun WorkbenchDetailPage(
                     put("threadId", detail.thread.id)
                     put("text", draft)
                     put("messageId", submittedId)
+                    put("backendScopeId", target.scope)
+                    if (draftAttachments.isNotEmpty())
+                        putJsonArray("localAttachmentIds") {
+                            draftAttachments.forEach { add(it.id) }
+                        }
                     detail.activeTurn?.let { put("turnId", it) }
                 },
             )
@@ -448,6 +512,25 @@ fun WorkbenchDetailPage(
                 IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreHoriz, "会话操作") }
                 DropdownMenu(menu, { menu = false }) {
                     DropdownMenuItem(
+                        text = { Text("执行记录") },
+                        leadingIcon = { Icon(Icons.Outlined.Terminal, null) },
+                        modifier = Modifier.testTag("show-executions"),
+                        onClick = {
+                            menu = false
+                            tab = 1
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("文件变更") },
+                        leadingIcon = { Icon(Icons.Outlined.Difference, null) },
+                        modifier = Modifier.testTag("show-changes"),
+                        onClick = {
+                            menu = false
+                            tab = 2
+                        },
+                    )
+                    HorizontalDivider()
+                    DropdownMenuItem(
                         text = { Text("选择继续方式") },
                         onClick = {
                             menu = false
@@ -462,7 +545,9 @@ fun WorkbenchDetailPage(
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("重命名") },
+                        text = { Text("重命名会话") },
+                        leadingIcon = { Icon(Icons.Outlined.Edit, null) },
+                        modifier = Modifier.testTag("rename-thread"),
                         enabled = canControl && !readOnly,
                         onClick = {
                             menu = false
@@ -498,13 +583,27 @@ fun WorkbenchDetailPage(
             }
         state.workbench.error?.let { Banner(it, true) }
         state.adminError?.let { Banner(it, true) }
-        SegmentedBar(
-            listOf("对话", "执行", "变更"),
-            tab,
-            { tab = it },
-            Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
-            "thread-tab",
-        )
+        if (tab != 0)
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(
+                    onClick = { tab = 0 },
+                    modifier = Modifier.testTag("back-to-conversation"),
+                ) {
+                    Icon(Icons.Outlined.ArrowBack, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("返回对话")
+                }
+                Spacer(Modifier.weight(1f))
+                Text(
+                    if (tab == 1) "执行记录" else "文件变更",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(end = 8.dp),
+                )
+            }
         val visible =
             detail.items.filter { item ->
                 when (tab) {
@@ -530,9 +629,8 @@ fun WorkbenchDetailPage(
                 } ?: true
             }
         }
-        val leadingRows =
-            (if (detail.nextCursor != null) 1 else 0) + (if (state.workbench.loading) 1 else 0)
-        LaunchedEffect(visible.size, visible.lastOrNull()?.text?.length, leadingRows) {
+        val leadingRows = if (detail.nextCursor != null) 1 else 0
+        LaunchedEffect(visible.lastOrNull()?.id, visible.lastOrNull()?.text?.length, tab) {
             if (nearEnd && visible.isNotEmpty())
                 scroll.scrollToItem(leadingRows + visible.lastIndex)
         }
@@ -541,52 +639,60 @@ fun WorkbenchDetailPage(
             if (outgoingId != null)
                 scroll.scrollToItem(leadingRows + visible.indexOfFirst { it.id == outgoingId })
         }
-        LazyColumn(
-            Modifier.weight(1f).fillMaxWidth().testTag("thread-timeline"),
-            state = scroll,
-            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(24.dp),
+        PullToRefreshBox(
+            isRefreshing = state.workbench.loading,
+            onRefresh = {
+                if (detail.nextCursor != null) actions.olderMessages()
+                else actions.openThread(detail.thread.id)
+            },
+            modifier = Modifier.weight(1f).fillMaxWidth().testTag("thread-pull-refresh"),
         ) {
-            if (detail.nextCursor != null)
-                item {
-                    TextButton(
-                        onClick = actions.olderMessages,
-                        enabled = !state.workbench.loading,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("加载更早记录")
+            LazyColumn(
+                Modifier.fillMaxSize().testTag("thread-timeline"),
+                state = scroll,
+                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(24.dp),
+            ) {
+                if (detail.nextCursor != null)
+                    item(key = "older-messages") {
+                        TextButton(
+                            onClick = actions.olderMessages,
+                            enabled = !state.workbench.loading,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("加载更早记录")
+                        }
                     }
-                }
-            if (state.workbench.loading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
-            if (visible.isEmpty() && (tab != 2 || detail.diff.isBlank()))
-                item {
-                    EmptyState(
-                        when (tab) {
-                            0 -> Icons.Outlined.ChatBubbleOutline
-                            1 -> Icons.Outlined.Terminal
-                            else -> Icons.Outlined.Difference
-                        },
-                        when (tab) {
-                            0 -> "有什么想完成的？"
-                            1 -> "暂无执行记录"
-                            else -> "暂无文件变更"
-                        },
-                        if (tab == 0) "从这里开始，和电脑上的 Codex 一起开发。" else "任务执行后的记录会实时显示。",
-                    )
-                }
-            items(visible, key = { it.id }) { MessageItem(it) }
-            if (tab == 2 && detail.diff.isNotBlank())
-                item {
-                    MessageItem(
-                        WorkItem(
-                            "live-diff",
-                            detail.activeTurn.orEmpty(),
-                            "fileChange",
-                            "本轮变更",
-                            detail.diff,
+                if (visible.isEmpty() && (tab != 2 || detail.diff.isBlank()))
+                    item {
+                        EmptyState(
+                            when (tab) {
+                                0 -> Icons.Outlined.ChatBubbleOutline
+                                1 -> Icons.Outlined.Terminal
+                                else -> Icons.Outlined.Difference
+                            },
+                            when (tab) {
+                                0 -> "有什么想完成的？"
+                                1 -> "暂无执行记录"
+                                else -> "暂无文件变更"
+                            },
+                            if (tab == 0) "从这里开始，和电脑上的 Codex 一起开发。" else "任务执行后的记录会实时显示。",
                         )
-                    )
-                }
+                    }
+                items(visible, key = { it.id }) { MessageItem(it, target, state, actions) }
+                if (tab == 2 && detail.diff.isNotBlank())
+                    item {
+                        MessageItem(
+                            WorkItem(
+                                "live-diff",
+                                detail.activeTurn.orEmpty(),
+                                "fileChange",
+                                "本轮变更",
+                                detail.diff,
+                            )
+                        )
+                    }
+            }
         }
         if (readOnly) {
             Column(
@@ -594,6 +700,7 @@ fun WorkbenchDetailPage(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                ComposerAttachments(state, target, actions, confirm)
                 Text(
                     "正在查看历史记录",
                     style = MaterialTheme.typography.bodySmall,
@@ -602,7 +709,9 @@ fun WorkbenchDetailPage(
                 Button(
                     onClick = { continuation = true },
                     modifier =
-                        Modifier.fillMaxWidth().heightIn(min = 50.dp).testTag("choose-session-mode"),
+                        Modifier.fillMaxWidth()
+                            .heightIn(min = 50.dp)
+                            .testTag("choose-session-mode"),
                 ) {
                     Text("选择继续方式")
                 }
@@ -612,6 +721,7 @@ fun WorkbenchDetailPage(
                 Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
+                ComposerAttachments(state, target, actions, confirm)
                 if (detail.activeTurn != null)
                     Row(
                         Modifier.fillMaxWidth().padding(start = 8.dp),
@@ -655,17 +765,23 @@ fun WorkbenchDetailPage(
                 ) {
                     Row(
                         Modifier.fillMaxWidth()
-                            .padding(start = 18.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                            .padding(start = 4.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
                         verticalAlignment = Alignment.Bottom,
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
+                        AttachmentPickerButton(target, state, actions, enabled = canControl)
                         Box(
                             Modifier.weight(1f).heightIn(min = 42.dp).padding(vertical = 9.dp),
                             contentAlignment = Alignment.CenterStart,
                         ) {
                             BasicTextField(
                                 draft,
-                                { if (it.toByteArray().size <= 64 * 1024) draft = it },
+                                {
+                                    if (it.toByteArray().size <= 64 * 1024) {
+                                        draft = it
+                                        actions.editDraft(target, it)
+                                    }
+                                },
                                 Modifier.fillMaxWidth().testTag("message-input"),
                                 textStyle =
                                     MaterialTheme.typography.bodyLarge.copy(
@@ -743,30 +859,38 @@ fun WorkbenchDetailPage(
             selectedApproval = null
         }
     }
-    if (rename) {
-        var name by rememberSaveable { mutableStateOf(detail.thread.title) }
-        EditorSheet(
-            "重命名会话",
-            { rename = false },
-            save = {
-                actions.workbenchAction(
-                    "rename",
-                    buildJsonObject {
-                        put("threadId", detail.thread.id)
-                        put("name", name.trim())
-                    },
-                )
-                rename = false
-            },
-            saveEnabled = canControl && name.isNotBlank(),
-        ) {
-            OutlinedTextField(
-                name,
-                { if (it.toByteArray().size <= 256) name = it },
-                label = { Text("会话名称") },
-                modifier = Modifier.fillMaxWidth(),
+    if (rename) RenameThreadSheet(detail.thread, canControl, actions) { rename = false }
+}
+
+@Composable
+fun RenameThreadSheet(
+    thread: WorkThread,
+    enabled: Boolean,
+    actions: LauncherActions,
+    dismiss: () -> Unit,
+) {
+    var name by rememberSaveable(thread.id) { mutableStateOf(thread.title) }
+    EditorSheet(
+        "重命名会话",
+        dismiss,
+        save = {
+            actions.workbenchAction(
+                "rename",
+                buildJsonObject {
+                    put("threadId", thread.id)
+                    put("name", name.trim())
+                },
             )
-        }
+            dismiss()
+        },
+        saveEnabled = enabled && name.isNotBlank(),
+    ) {
+        OutlinedTextField(
+            name,
+            { if (it.toByteArray().size <= 256) name = it },
+            label = { Text("会话名称") },
+            modifier = Modifier.fillMaxWidth().testTag("rename-thread-input"),
+        )
     }
 }
 
@@ -836,7 +960,12 @@ private fun ModelPicker(value: String, models: List<JsonObject>, changed: (Strin
 }
 
 @Composable
-fun MessageItem(item: WorkItem) {
+fun MessageItem(
+    item: WorkItem,
+    target: DraftTarget? = null,
+    state: CompanionState? = null,
+    actions: LauncherActions = LauncherActions(),
+) {
     var expanded by rememberSaveable(item.id) { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
     val user = item.kind == "userMessage"
@@ -895,8 +1024,13 @@ fun MessageItem(item: WorkItem) {
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                         }
+                    if (target != null && state != null && item.attachments.isNotEmpty()) {
+                        item.attachments.forEach {
+                            AttachmentMessageCard(it, target, state, actions)
+                        }
+                    }
                     if (agent) MarkdownReply(content)
-                    else
+                    else if (content.isNotBlank())
                         SelectionContainer {
                             Text(
                                 content,

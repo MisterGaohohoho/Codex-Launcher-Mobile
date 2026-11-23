@@ -1,12 +1,14 @@
 package com.codexlauncher.companion
 
 import android.app.Application
+import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.codexlauncher.companion.data.*
+import java.io.File
 import java.time.Instant
 import java.util.UUID
 import javax.net.ssl.SSLException
@@ -54,6 +56,12 @@ data class CompanionState(
     val lastAdminOutcome: AdminOutcome? = null,
     val uncertainCommand: AdminCommand? = null,
     val update: UpdateState = UpdateState(),
+    val attachmentDrafts: Map<String, ComposerDraft> = emptyMap(),
+    val pendingMessages: Map<String, PendingMessage> = emptyMap(),
+    val importingAttachments: Set<String> = emptySet(),
+    val attachmentFiles: Map<String, File> = emptyMap(),
+    val attachmentErrors: Map<String, String> = emptyMap(),
+    val lastDraftSubmissionId: String = "",
 ) {
     // A network result can be newer than the UI's one-second clock tick.
     fun fresh(now: Long): Boolean =
@@ -93,6 +101,63 @@ constructor(
     private var latestAdminQuery: Pair<String, JsonObject>? = null
     private val updater = AppUpdater(application)
     private val outgoingMessages = OutgoingMessages()
+    private val messages =
+        MessageController(
+            application,
+            viewModelScope,
+            { api },
+            { mutable.value },
+            { update -> mutable.update(update) },
+            { request, attachments -> executeAdmin(request, attachments) },
+            { message, status, result ->
+                message.request?.let { outgoingMessages.settle(it, status, result) }
+                mutable.update {
+                    it.copy(
+                        uncertainCommand =
+                            it.uncertainCommand?.takeUnless { command ->
+                                command.input["messageId"].text() == message.messageId
+                            },
+                        adminError = null,
+                        workbench =
+                            it.workbench.copy(
+                                detail = it.workbench.detail?.let(outgoingMessages::decorate)
+                            ),
+                    )
+                }
+                mutable.value.workbench.detail?.thread?.id?.let { openThread(it, quiet = true) }
+            },
+        )
+
+    private suspend fun bindOutgoing(computer: PairedComputer) =
+        withContext(Dispatchers.IO) {
+            outgoingMessages.bind(
+                File(
+                    getApplication<Application>().filesDir,
+                    "outgoing/" + bytesSha256(computer.certificateSha256.toByteArray()) + ".json",
+                )
+            )
+        }
+
+    fun editDraft(target: DraftTarget, text: String) = messages.edit(target, text)
+
+    fun importAttachments(target: DraftTarget, uris: List<Uri>, photos: Boolean) {
+        viewModelScope.launch {
+            initialization.join()
+            messages.import(target, uris, photos)
+        }
+    }
+
+    fun removeAttachment(target: DraftTarget, id: String) = messages.remove(target, id)
+
+    fun resumeMessage(id: String, acceptCurrentTurn: Boolean = false) =
+        messages.resume(id, acceptCurrentTurn)
+
+    fun pauseMessage(id: String) = messages.pause(id)
+
+    fun discardMessage(id: String) = messages.discard(id)
+
+    fun loadAttachment(target: DraftTarget, meta: AttachmentMeta, preview: Boolean) =
+        messages.load(target, meta, preview)
 
     private val initialization = viewModelScope.launch {
         try {
@@ -101,6 +166,7 @@ constructor(
                 validateEndpoint(computer.endpoint)
                 api =
                     makeClient(computer.endpoint, computer.certificateSha256, computer.deviceToken)
+                bindOutgoing(computer)
                 mutable.update { it.copy(computer = computer) }
                 startPolling()
             }
@@ -115,6 +181,7 @@ constructor(
         foreground = value
         if (value) startPolling()
         else {
+            messages.pause()
             polling?.cancel()
             polling = null
             streamJob?.cancel()
@@ -238,6 +305,7 @@ constructor(
                 previous = api
                 api = replacement
                 replacement = null
+                bindOutgoing(computer)
                 mutable.update {
                     CompanionState(
                         computer = computer,
@@ -246,6 +314,7 @@ constructor(
                         pairingGeneration = it.pairingGeneration + 1,
                     )
                 }
+                messages.publish()
                 startPolling()
             } catch (e: CancellationException) {
                 throw e
@@ -270,6 +339,7 @@ constructor(
                 polling = null
                 detailsJob?.cancel()
                 resetWorkbenchJobs()
+                outgoingMessages.clear()
                 val previous = api
                 api = null
                 mutable.update { CompanionState(theme = it.theme) }
@@ -421,7 +491,7 @@ constructor(
     }
 
     private fun resetWorkbenchJobs() {
-        outgoingMessages.clear()
+        messages.pause()
         streamJob?.cancel()
         streamJob = null
         workbenchJob?.cancel()
@@ -563,6 +633,13 @@ constructor(
 
     fun openThread(id: String, quiet: Boolean = false, older: Boolean = false) {
         val source = api ?: return
+        if (
+            older &&
+                (threadJob?.isActive == true ||
+                    mutable.value.workbench.detail?.takeIf { it.thread.id == id }?.nextCursor ==
+                        null)
+        )
+            return
         if (quiet && threadJob?.isActive == true) return
         threadJob?.cancel()
         lastThreadRefresh = SystemClock.elapsedRealtime()
@@ -628,8 +705,10 @@ constructor(
         loadWorkbench()
     }
 
-    fun workbenchAction(action: String, input: JsonObject) =
-        adminCommand("workbench.$action", input)
+    fun workbenchAction(action: String, input: JsonObject) {
+        if (action in listOf("send", "steer")) messages.send(action, input)
+        else adminCommand("workbench.$action", input)
+    }
 
     private fun applyWorkbenchResult(action: String, result: JsonObject) {
         when (action) {
@@ -723,7 +802,10 @@ constructor(
     }
 
     fun retryUncertainCommand() {
-        mutable.value.uncertainCommand?.let(::executeAdmin)
+        val request = mutable.value.uncertainCommand ?: return
+        val id = request.input["messageId"].text()
+        if (mutable.value.pendingMessages.containsKey(id)) messages.verify(id)
+        else executeAdmin(request)
     }
 
     fun checkUpdate() {
@@ -780,17 +862,20 @@ constructor(
         mutable.update { it.copy(update = it.update.copy(error = "无法打开系统安装器，请检查安装权限后重试")) }
     }
 
-    private fun executeAdmin(request: AdminCommand) {
-        val source = api ?: return
+    private fun executeAdmin(
+        request: AdminCommand,
+        attachments: List<AttachmentMeta> = emptyList(),
+    ): Boolean {
+        val source = api ?: return false
         if (!mutable.value.canControl(SystemClock.elapsedRealtime())) {
             mutable.update { it.copy(notice = "请等待已授权电脑恢复在线") }
-            return
+            return false
         }
         if (mutable.value.uncertainCommand?.let { it.requestId != request.requestId } == true) {
             mutable.update { it.copy(notice = "请先核对上一项操作的结果") }
-            return
+            return false
         }
-        outgoingMessages.begin(request)
+        outgoingMessages.begin(request, attachments)
         mutable.update {
             it.copy(
                 busy = true,
@@ -806,6 +891,16 @@ constructor(
             try {
                 val result = source.command(request)
                 if (source === api) {
+                    messages.settled(request, result, null)
+                    if (request.action == "workbench.create") {
+                        val id = result["thread"].obj()["id"].text()
+                        if (id.isNotBlank())
+                            messages.created(
+                                mutable.value.computer?.certificateSha256.orEmpty(),
+                                request.input["draftScopeId"].text(),
+                                id,
+                            )
+                    }
                     outgoingMessages.settle(request, "sent", result)
                     mutable.update {
                         it.copy(
@@ -826,6 +921,27 @@ constructor(
                     }
                     if (request.action.startsWith("workbench."))
                         applyWorkbenchResult(request.action.removePrefix("workbench."), result)
+                    if (request.action == "workbench.rename") {
+                        val id = request.input["threadId"].text()
+                        val name = request.input["name"].text()
+                        mutable.update { state ->
+                            state.copy(
+                                workbench =
+                                    state.workbench.copy(
+                                        threads =
+                                            state.workbench.threads.map {
+                                                if (it.id == id) it.copy(title = name) else it
+                                            },
+                                        detail =
+                                            state.workbench.detail?.let {
+                                                if (it.thread.id == id)
+                                                    it.copy(thread = it.thread.copy(title = name))
+                                                else it
+                                            },
+                                    )
+                            )
+                        }
+                    }
                     if (request.action == "configuration.patch") {
                         val config = WireJson.decodeFromJsonElement<ConfigurationEnvelope>(result)
                         mutable.update { it.copy(configuration = config, notice = config.message) }
@@ -850,8 +966,9 @@ constructor(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                val uncertain = e !is ApiException
+                val uncertain = e.commandResultUnknown()
                 if (source !== api) return@launch
+                messages.settled(request, null, e)
                 outgoingMessages.settle(request, if (uncertain) "unconfirmed" else "notSent")
                 mutable.update {
                     it.copy(
@@ -869,6 +986,7 @@ constructor(
                 refreshNow()
             }
         }
+        return true
     }
 
     private suspend fun closeClient(client: CompanionApi?) {

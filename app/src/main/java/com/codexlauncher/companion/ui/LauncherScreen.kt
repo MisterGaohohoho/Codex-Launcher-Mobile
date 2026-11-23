@@ -8,6 +8,7 @@ package com.codexlauncher.companion.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -52,6 +53,14 @@ data class LauncherActions(
     val closeThread: () -> Unit = {},
     val olderMessages: () -> Unit = {},
     val workbenchAction: (String, JsonObject) -> Unit = { _, _ -> },
+    val editDraft: (DraftTarget, String) -> Unit = { _, _ -> },
+    val importAttachments: (DraftTarget, List<android.net.Uri>, Boolean) -> Unit = { _, _, _ -> },
+    val pickAttachment: (DraftTarget, String) -> Unit = { _, _ -> },
+    val removeAttachment: (DraftTarget, String) -> Unit = { _, _ -> },
+    val resumeMessage: (String, Boolean) -> Unit = { _, _ -> },
+    val pauseMessage: (String) -> Unit = {},
+    val discardMessage: (String) -> Unit = {},
+    val loadAttachment: (DraftTarget, AttachmentMeta, Boolean) -> Unit = { _, _, _ -> },
     val loadConfiguration: () -> Unit = {},
     val saveConfiguration: (String, JsonObject) -> Unit = { _, _ -> },
     val adminQuery: (String, JsonObject) -> Unit = { _, _ -> },
@@ -85,6 +94,7 @@ fun LauncherScreen(
     var handledPairing by rememberSaveable { mutableLongStateOf(state.pairingGeneration) }
     var confirmation by remember { mutableStateOf<ConfirmAction?>(null) }
     var newThread by rememberSaveable { mutableStateOf(false) }
+    var renameThread by rememberSaveable { mutableStateOf(false) }
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val savedPages = rememberSaveableStateHolder()
@@ -188,7 +198,19 @@ fun LauncherScreen(
             topBar = {
                 CenterAlignedTopAppBar(
                     title = {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Column(
+                            Modifier.clickable(
+                                    enabled =
+                                        showThread &&
+                                            canControl &&
+                                            state.workbench.detail?.thread?.canContinueOriginal ==
+                                                true
+                                ) {
+                                    renameThread = true
+                                }
+                                .testTag("conversation-title"),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
                             Text(
                                 if (showPairing) "Launcher"
                                 else
@@ -215,7 +237,14 @@ fun LauncherScreen(
                             Text(
                                 if (showPairing) "你的移动工作台"
                                 else if (showThread)
-                                    state.workbench.detail?.thread?.project.orEmpty()
+                                    state.workbench.detail
+                                        ?.thread
+                                        ?.let { thread ->
+                                            thread.model.ifBlank { "模型未返回" } +
+                                                " · " +
+                                                thread.project
+                                        }
+                                        .orEmpty()
                                 else
                                     state.computer?.computerName.orEmpty() +
                                         if (fresh) " · 在线" else " · 离线",
@@ -354,6 +383,10 @@ fun LauncherScreen(
         }
     }
     if (newThread) NewThreadSheet(state, canControl, actions) { newThread = false }
+    if (renameThread)
+        state.workbench.detail?.thread?.let {
+            RenameThreadSheet(it, canControl, actions) { renameThread = false }
+        }
     confirmation?.let { confirm ->
         AlertDialog(
             onDismissRequest = { confirmation = null },
@@ -631,13 +664,12 @@ fun statusTitle(status: String) =
         else -> status.ifBlank { "等待同步" }
     }
 
-fun timeLabel(value: String): String =
-    runCatching {
-            DateTimeFormatter.ofPattern("HH:mm:ss")
-                .withZone(ZoneId.systemDefault())
-                .format(Instant.parse(value))
-        }
-        .getOrDefault(value.take(19))
+fun timeLabel(value: String): String = runCatching {
+    DateTimeFormatter.ofPattern("HH:mm:ss")
+        .withZone(ZoneId.systemDefault())
+        .format(Instant.parse(value))
+}
+    .getOrDefault(value.take(19))
 
 fun durationLabel(seconds: Long): String =
     if (seconds >= 3600) "%d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60)

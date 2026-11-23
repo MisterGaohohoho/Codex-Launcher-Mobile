@@ -3,9 +3,12 @@ package com.codexlauncher.companion
 import com.codexlauncher.companion.data.*
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 class OutgoingMessagesTest {
+    @get:Rule val temporary = TemporaryFolder()
     private val thread =
         WorkThread("fork", "Fork", "C:/Project", "idle", "managed", 0, "fixture", "appServer")
     private val empty = ThreadDetail(thread, emptyList())
@@ -131,5 +134,46 @@ class OutgoingMessagesTest {
         assertEquals("notSent", rejected.items.single().status)
         pending.clear()
         assertTrue(pending.decorate(rejected).items.isEmpty())
+    }
+
+    @Test
+    fun pureAttachmentEchoSurvivesRestartAndCannotLeakAcrossBackendScopes() {
+        val file = java.io.File(temporary.newFolder(), "outgoing.json")
+        val request =
+            command(text = "").let {
+                it.copy(
+                    input = JsonObject(it.input + ("backendScopeId" to JsonPrimitive("scope-a")))
+                )
+            }
+        val attachment = AttachmentMeta("att-fixture", "reference.png", kind = "image")
+        val first =
+            OutgoingMessages().apply {
+                bind(file)
+                begin(request, listOf(attachment))
+                settle(request, "unconfirmed")
+            }
+        assertEquals(
+            attachment,
+            first
+                .decorate(empty.copy(backendScopeId = "scope-a"))
+                .items
+                .single()
+                .attachments
+                .single(),
+        )
+        val restored = OutgoingMessages().apply { bind(file) }
+        assertTrue(restored.decorate(empty.copy(backendScopeId = "scope-b")).items.isEmpty())
+        val echo = restored.decorate(empty.copy(backendScopeId = "scope-a")).items.single()
+        assertEquals("unconfirmed", echo.status)
+        assertEquals("", echo.text)
+        val server = echo.copy(id = "server-confirmed", localEcho = false, status = "")
+        restored.decorate(empty.copy(items = listOf(server), backendScopeId = "scope-a"))
+        assertTrue(
+            OutgoingMessages()
+                .apply { bind(file) }
+                .decorate(empty.copy(backendScopeId = "scope-a"))
+                .items
+                .isEmpty()
+        )
     }
 }
