@@ -31,6 +31,7 @@ fun SettingsPage(
     actions: LauncherActions,
     navigate: (String) -> Unit,
     pair: () -> Unit,
+    computers: () -> Unit = {},
     confirm: (ConfirmAction) -> Unit,
 ) {
     var computer by remember { mutableStateOf(false) }
@@ -42,7 +43,15 @@ fun SettingsPage(
         item {
             SettingsGroup {
                 SettingRow(
-                    state.computer?.computerName.orEmpty(),
+                    "我的电脑",
+                    "${state.computers.ifEmpty { listOfNotNull(state.computer) }.size} 台",
+                    "切换电脑或添加另一台电脑",
+                    Icons.Outlined.Devices,
+                    onClick = computers,
+                )
+                SettingDivider()
+                SettingRow(
+                    state.computer?.displayName.orEmpty(),
                     if (state.computer?.canControl == true) "完整管理" else "仅查看",
                     "已配对的开发电脑",
                     Icons.Outlined.Computer,
@@ -118,9 +127,15 @@ fun SettingsPage(
     if (computer)
         EditorSheet("已连接的电脑", { computer = false }) {
             SettingsGroup {
-                SettingRow("名称", state.computer?.computerName)
+                SettingRow("名称", state.computer?.displayName)
                 SettingDivider()
-                SettingRow("地址", subtitle = state.computer?.endpoint)
+                SettingRow(
+                    "当前地址",
+                    subtitle =
+                        state.connectionInfo.endpoint.ifBlank {
+                            state.computer?.endpoint.orEmpty()
+                        },
+                )
                 SettingDivider()
                 SettingRow("权限", if (state.computer?.canControl == true) "完整管理" else "仅查看")
             }

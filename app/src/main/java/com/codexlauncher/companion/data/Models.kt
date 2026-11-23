@@ -98,6 +98,7 @@ data class PairResponse(
     val canControl: Boolean,
     val expiresAt: String,
     val protocolVersion: Int,
+    val connectionEndpoints: List<String> = emptyList(),
 )
 
 @Serializable
@@ -109,7 +110,15 @@ data class PairedComputer(
     val computerName: String,
     val canControl: Boolean,
     val expiresAt: String,
-)
+    val nickname: String = "",
+    val connectionEndpoints: List<String> = emptyList(),
+) {
+    val id: String
+        get() = certificateSha256.lowercase()
+
+    val displayName: String
+        get() = nickname.ifBlank { computerName }
+}
 
 @Serializable
 data class RunConfiguration(
@@ -178,6 +187,7 @@ data class Snapshot(
     val configurationRevision: String = "",
     val capabilities: List<String> = emptyList(),
     val commandEpoch: String = "",
+    val connectionEndpoints: List<String> = emptyList(),
 )
 
 @Serializable

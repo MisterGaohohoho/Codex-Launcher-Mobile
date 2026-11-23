@@ -22,6 +22,13 @@ import kotlinx.serialization.json.*
 
 data class DetailTarget(val runId: String, val worker: WorkerSummary)
 
+data class ComputerOverview(
+    val snapshot: Snapshot? = null,
+    val checkedAt: Long = 0,
+    val error: String? = null,
+    val checking: Boolean = false,
+)
+
 data class AdminOutcome(
     val requestId: String,
     val action: String,
@@ -32,6 +39,12 @@ data class AdminOutcome(
 
 data class CompanionState(
     val computer: PairedComputer? = null,
+    val computers: List<PairedComputer> = emptyList(),
+    val computerStatuses: Map<String, ComputerOverview> = emptyMap(),
+    val switchingComputer: Boolean = false,
+    val connecting: Boolean = false,
+    val connectionFailures: Int = 0,
+    val connectionInfo: ConnectionInfo = ConnectionInfo(),
     val snapshot: Snapshot? = null,
     val online: Boolean = false,
     val lastSyncElapsed: Long = 0,
@@ -68,6 +81,17 @@ data class CompanionState(
         online && lastSyncElapsed > 0 && (now - lastSyncElapsed).coerceAtLeast(0) <= 8000
 
     fun canControl(now: Long): Boolean = fresh(now) && computer?.canControl == true && !busy
+
+    fun connectionLabel(now: Long): String =
+        when {
+            fresh(now) -> "在线"
+            connectionFailures >= 3 || !online && !connecting && connectionError != null -> "连接中断"
+            lastSyncElapsed > 0 &&
+                (now - lastSyncElapsed).coerceAtLeast(0) > 30_000 &&
+                connectionFailures > 0 -> "连接中断"
+            lastSyncElapsed > 0 -> "正在同步"
+            else -> "连接中"
+        }
 }
 
 class CompanionViewModel
@@ -82,6 +106,12 @@ constructor(
     private val mutable = MutableStateFlow(CompanionState(theme = store.theme))
     val state = mutable.asStateFlow()
     private var api: CompanionApi? = null
+    private var profiles = ComputerProfiles()
+    private val computerChanges = Mutex()
+    private val computerCache = linkedMapOf<String, CompanionState>()
+    private val threadCache = linkedMapOf<String, ThreadDetail>()
+    private var computerOverviewJob: Job? = null
+    private var configurationJob: Job? = null
     private var foreground = false
     private var polling: Job? = null
     private var detailsJob: Job? = null
@@ -100,7 +130,7 @@ constructor(
     private var adminQueryJob: Job? = null
     private var latestAdminQuery: Pair<String, JsonObject>? = null
     private val updater = AppUpdater(application)
-    private val outgoingMessages = OutgoingMessages()
+    private var outgoingMessages = OutgoingMessages()
     private val messages =
         MessageController(
             application,
@@ -128,14 +158,18 @@ constructor(
             },
         )
 
-    private suspend fun bindOutgoing(computer: PairedComputer) =
+    private suspend fun outgoingFor(computer: PairedComputer): OutgoingMessages =
         withContext(Dispatchers.IO) {
-            outgoingMessages.bind(
-                File(
-                    getApplication<Application>().filesDir,
-                    "outgoing/" + bytesSha256(computer.certificateSha256.toByteArray()) + ".json",
+            OutgoingMessages().apply {
+                bind(
+                    File(
+                        getApplication<Application>().filesDir,
+                        "outgoing/" +
+                            bytesSha256(computer.certificateSha256.toByteArray()) +
+                            ".json",
+                    )
                 )
-            )
+            }
         }
 
     fun editDraft(target: DraftTarget, text: String) = messages.edit(target, text)
@@ -161,12 +195,15 @@ constructor(
 
     private val initialization = viewModelScope.launch {
         try {
-            val computer = withContext(Dispatchers.IO) { store.load() }
+            profiles = withContext(Dispatchers.IO) { store.loadProfiles() }
+            val computer = profiles.active
+            mutable.update { it.copy(computers = profiles.computers) }
             if (computer != null) {
                 validateEndpoint(computer.endpoint)
                 api =
                     makeClient(computer.endpoint, computer.certificateSha256, computer.deviceToken)
-                bindOutgoing(computer)
+                api?.updateEndpoints(computer.connectionEndpoints)
+                outgoingMessages = outgoingFor(computer)
                 mutable.update { it.copy(computer = computer) }
                 startPolling()
             }
@@ -182,6 +219,7 @@ constructor(
         if (value) startPolling()
         else {
             messages.pause()
+            computerOverviewJob?.cancel()
             polling?.cancel()
             polling = null
             streamJob?.cancel()
@@ -203,7 +241,10 @@ constructor(
         polling = viewModelScope.launch {
             while (isActive && foreground) {
                 refreshNow()
-                delay(2000)
+                delay(
+                    if (mutable.value.connectionFailures == 0) 2000
+                    else (1000L shl mutable.value.connectionFailures.coerceAtMost(3))
+                )
             }
         }
     }
@@ -217,6 +258,7 @@ constructor(
 
     private suspend fun refreshNow() = refreshLock.withLock {
         val source = api ?: return@withLock
+        mutable.update { it.copy(connecting = true) }
         try {
             val value = source.snapshot()
             if (source !== api) return@withLock
@@ -227,8 +269,16 @@ constructor(
                     lastSyncElapsed = SystemClock.elapsedRealtime(),
                     lastSyncAt = System.currentTimeMillis(),
                     connectionError = null,
+                    connecting = false,
+                    connectionFailures = 0,
+                    connectionInfo = source.connectionInfo,
+                    computerStatuses =
+                        it.computerStatuses +
+                            (it.computer!!.id to
+                                ComputerOverview(value, System.currentTimeMillis())),
                 )
             }
+            rememberEndpoints(source, value)
             if (
                 foreground &&
                     mutable.value.computer?.canControl == true &&
@@ -236,7 +286,8 @@ constructor(
             ) {
                 startStream()
                 if (
-                    mutable.value.workbench.detail == null &&
+                    (mutable.value.workbench.detail == null ||
+                        mutable.value.workbench.capabilities == null) &&
                         !mutable.value.workbench.loading &&
                         (lastWorkbenchRefresh == 0L ||
                             (mutable.value.workbench.threads.size <= 30 &&
@@ -265,24 +316,162 @@ constructor(
             throw e
         } catch (e: Exception) {
             if (source === api)
-                mutable.update { it.copy(online = false, connectionError = explain(e, false)) }
-            if (e is ApiException && e.status == 401) {
+                mutable.update {
+                    it.copy(
+                        online = if (e is ApiException && e.status == 401) false else it.online,
+                        connecting = false,
+                        connectionFailures = it.connectionFailures + 1,
+                        connectionError = explain(e, false),
+                    )
+                }
+            if (source === api && e is ApiException && e.status == 401) {
                 polling?.cancel()
                 polling = null
+            }
+        } finally {
+            if (source === api) mutable.update { it.copy(connecting = false) }
+        }
+    }
+
+    private suspend fun rememberEndpoints(source: CompanionApi, snapshot: Snapshot) {
+        if (snapshot.connectionEndpoints.isEmpty()) return
+        computerChanges.withLock {
+            if (source !== api) return@withLock
+            val computer = mutable.value.computer ?: return@withLock
+            val endpoints =
+                (snapshot.connectionEndpoints + computer.connectionEndpoints)
+                    .filter { runCatching { validateEndpoint(it) }.isSuccess }
+                    .distinct()
+                    .take(16)
+            if (
+                endpoints == computer.connectionEndpoints &&
+                    computer.computerName == snapshot.computerName
+            )
+                return@withLock
+            val updated =
+                computer.copy(
+                    connectionEndpoints = endpoints,
+                    computerName = snapshot.computerName.take(128),
+                )
+            val next = profiles.upsert(updated, activate = false)
+            try {
+                withContext(Dispatchers.IO) { store.saveProfiles(next) }
+                profiles = next
+                mutable.update { it.copy(computer = updated, computers = next.computers) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                /* Keep the working session; retry persistence after the next snapshot. */
             }
         }
     }
 
+    private fun cacheComputer() {
+        val value = mutable.value
+        val id = value.computer?.id ?: return
+        computerCache.remove(id)
+        computerCache[id] =
+            value.copy(busy = false, pairing = false, online = false, connecting = false)
+        while (computerCache.size > 4) {
+            val evict =
+                computerCache.entries.firstOrNull {
+                    it.key != id && it.value.uncertainCommand == null
+                } ?: break
+            computerCache.remove(evict.key)
+        }
+    }
+
+    // Persist a complete profile set before changing the live connection. A failed save keeps the
+    // old PC usable.
+    private suspend fun activate(
+        next: ComputerProfiles,
+        notice: String? = null,
+        paired: Boolean = false,
+    ) {
+        val computer = next.active
+        var candidate: CompanionApi? = null
+        try {
+            candidate = computer?.let {
+                makeClient(it.endpoint, it.certificateSha256, it.deviceToken).apply {
+                    updateEndpoints(it.connectionEndpoints)
+                }
+            }
+            val outgoing = computer?.let { outgoingFor(it) } ?: OutgoingMessages()
+            withContext(Dispatchers.IO) { store.saveProfiles(next) }
+            polling?.cancelAndJoin()
+            polling = null
+            detailsJob?.cancel()
+            resetWorkbenchJobs()
+            messages.pauseAndJoin()
+            cacheComputer()
+            val previous = api
+            api = candidate
+            candidate = null
+            outgoingMessages = outgoing
+            profiles = next
+            val global = mutable.value
+            val cached = computer?.let { computerCache[it.id] } ?: CompanionState()
+            mutable.value =
+                cached.copy(
+                    computer = computer,
+                    computers = next.computers,
+                    computerStatuses =
+                        global.computerStatuses.filterKeys { key ->
+                            next.computers.any { it.id == key }
+                        },
+                    theme = global.theme,
+                    update = global.update,
+                    notice = notice,
+                    busy = true,
+                    pairing = false,
+                    pairingError = null,
+                    switchingComputer = true,
+                    online = false,
+                    connecting = false,
+                    lastSyncElapsed = 0,
+                    connectionFailures = 0,
+                    connectionError = null,
+                    connectionInfo =
+                        api?.connectionInfo ?: ConnectionInfo(computer?.endpoint.orEmpty()),
+                    pairingGeneration = global.pairingGeneration + if (paired) 1 else 0,
+                    configurationLoading = false,
+                    adminLoading = false,
+                    detailTarget = null,
+                    detailsLoading = false,
+                    details = null,
+                    detailsError = null,
+                    lastAdminOutcome = null,
+                    workbench =
+                        cached.workbench.copy(
+                            loading = false,
+                            streaming = false,
+                            detailLoading = false,
+                            capabilities = null,
+                        ),
+                )
+            messages.publish()
+            startPolling()
+            closeClient(previous)
+            mutable.update { it.copy(busy = false, switchingComputer = false) }
+        } finally {
+            closeClient(candidate)
+        }
+    }
+
     fun pair(text: String) {
-        if (mutable.value.busy) return
+        if (mutable.value.busy || mutable.value.switchingComputer) return
         mutable.update { it.copy(busy = true, pairing = true, pairingError = null) }
         viewModelScope.launch {
             var candidate: CompanionApi? = null
-            var replacement: CompanionApi? = null
-            var previous: CompanionApi? = null
             try {
                 initialization.join()
                 val code = PairingCode.parse(text)
+                require(
+                    profiles.computers.size < ComputerProfiles.MAX_COMPUTERS ||
+                        profiles.computers.any { it.id == code.certificateSha256.lowercase() }
+                ) {
+                    "电脑列表已满，请先移除不再使用的电脑"
+                }
                 candidate = makeClient(code.endpoint, code.certificateSha256, null)
                 val reply = candidate.pair(code, "${Build.MANUFACTURER} ${Build.MODEL}".take(64))
                 val computer =
@@ -294,28 +483,15 @@ constructor(
                         reply.computerName,
                         reply.canControl,
                         reply.expiresAt,
+                        connectionEndpoints =
+                            reply.connectionEndpoints
+                                .filter { runCatching { validateEndpoint(it) }.isSuccess }
+                                .distinct()
+                                .take(16),
                     )
-                replacement =
-                    makeClient(computer.endpoint, computer.certificateSha256, computer.deviceToken)
-                withContext(Dispatchers.IO) { store.save(computer) }
-                polling?.cancel()
-                polling = null
-                detailsJob?.cancel()
-                resetWorkbenchJobs()
-                previous = api
-                api = replacement
-                replacement = null
-                bindOutgoing(computer)
-                mutable.update {
-                    CompanionState(
-                        computer = computer,
-                        theme = it.theme,
-                        notice = "电脑已连接",
-                        pairingGeneration = it.pairingGeneration + 1,
-                    )
+                computerChanges.withLock {
+                    activate(profiles.upsert(computer), "电脑已添加，可在我的电脑中切换", paired = true)
                 }
-                messages.publish()
-                startPolling()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -323,34 +499,196 @@ constructor(
             } finally {
                 mutable.update { it.copy(busy = false, pairing = false) }
                 closeClient(candidate)
-                closeClient(replacement)
-                closeClient(previous)
+            }
+        }
+    }
+
+    fun selectComputer(id: String) {
+        if (id == mutable.value.computer?.id) return
+        if (mutable.value.busy || mutable.value.switchingComputer) {
+            mutable.update { it.copy(notice = "请等待当前操作提交完成后切换电脑") }
+            return
+        }
+        mutable.update { it.copy(switchingComputer = true, busy = true) }
+        viewModelScope.launch {
+            try {
+                initialization.join()
+                computerChanges.withLock { activate(profiles.select(id)) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                mutable.update { it.copy(notice = e.message ?: "切换电脑失败") }
+            } finally {
+                mutable.update { it.copy(switchingComputer = false, busy = false) }
+            }
+        }
+    }
+
+    fun editComputer(id: String, name: String, endpoint: String) {
+        if (mutable.value.busy) return
+        viewModelScope.launch {
+            try {
+                require(name.trim().length <= 64 && name.none { it.isISOControl() }) {
+                    "电脑备注不能超过 64 个字符"
+                }
+                val extra =
+                    endpoint
+                        .trim()
+                        .takeIf { it.isNotBlank() }
+                        ?.let { validateEndpoint(it).toString().trimEnd('/') }
+                computerChanges.withLock {
+                    val old = profiles.computers.firstOrNull { it.id == id } ?: return@withLock
+                    val updated =
+                        old.copy(
+                            nickname = name.trim(),
+                            connectionEndpoints =
+                                (listOfNotNull(extra) + old.connectionEndpoints)
+                                    .distinct()
+                                    .take(16),
+                        )
+                    val next = profiles.upsert(updated, activate = false, preserveNickname = false)
+                    withContext(Dispatchers.IO) { store.saveProfiles(next) }
+                    profiles = next
+                    if (mutable.value.computer?.id == id)
+                        api?.updateEndpoints(updated.connectionEndpoints)
+                    mutable.update {
+                        it.copy(
+                            computers = next.computers,
+                            computer = next.active,
+                            notice = "电脑信息已保存",
+                        )
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                mutable.update { it.copy(notice = e.message ?: "保存电脑信息失败") }
+            }
+        }
+    }
+
+    fun removeComputer(id: String) {
+        if (mutable.value.busy) return
+        val cached = if (id == mutable.value.computer?.id) mutable.value else computerCache[id]
+        if (cached?.uncertainCommand != null) {
+            mutable.update { it.copy(notice = "这台电脑还有结果未确认的操作，请先核对后再移除") }
+            return
+        }
+        mutable.update { it.copy(busy = true) }
+        viewModelScope.launch {
+            try {
+                initialization.join()
+                computerChanges.withLock {
+                    val next = profiles.remove(id)
+                    if (id == mutable.value.computer?.id) activate(next, "已移除本机保存的电脑授权")
+                    else {
+                        withContext(Dispatchers.IO) { store.saveProfiles(next) }
+                        profiles = next
+                        mutable.update {
+                            it.copy(
+                                computers = next.computers,
+                                computerStatuses = it.computerStatuses - id,
+                            )
+                        }
+                    }
+                    computerCache.remove(id)
+                    threadCache.keys.removeAll { it.startsWith("$id:") }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                mutable.update { it.copy(notice = e.message ?: "无法移除电脑授权") }
+            } finally {
+                mutable.update { it.copy(busy = false) }
             }
         }
     }
 
     fun forget() {
-        if (mutable.value.busy) return
-        mutable.update { it.copy(busy = true) }
-        viewModelScope.launch {
-            try {
-                withContext(Dispatchers.IO) { store.clear() }
-                polling?.cancel()
-                polling = null
-                detailsJob?.cancel()
-                resetWorkbenchJobs()
-                outgoingMessages.clear()
-                val previous = api
-                api = null
-                mutable.update { CompanionState(theme = it.theme) }
-                closeClient(previous)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                mutable.update { it.copy(notice = "无法移除本机授权，请稍后重试") }
-            } finally {
-                mutable.update { it.copy(busy = false) }
-            }
+        mutable.value.computer?.id?.let(::removeComputer)
+    }
+
+    fun refreshComputers() {
+        if (!foreground || computerOverviewJob?.isActive == true) return
+        computerOverviewJob = viewModelScope.launch {
+            val limiter = kotlinx.coroutines.sync.Semaphore(2)
+            profiles.computers
+                .filter { it.id != mutable.value.computer?.id }
+                .map { computer ->
+                    launch {
+                        limiter.acquire()
+                        var client: CompanionApi? = null
+                        try {
+                            if (profiles.computers.none { it.id == computer.id }) return@launch
+                            mutable.update {
+                                it.copy(
+                                    computerStatuses =
+                                        it.computerStatuses +
+                                            (computer.id to
+                                                (it.computerStatuses[computer.id]
+                                                        ?: ComputerOverview())
+                                                    .copy(checking = true))
+                                )
+                            }
+                            client =
+                                makeClient(
+                                        computer.endpoint,
+                                        computer.certificateSha256,
+                                        computer.deviceToken,
+                                    )
+                                    .apply { updateEndpoints(computer.connectionEndpoints) }
+                            val value = client.snapshot()
+                            if (
+                                profiles.computers.any { it.id == computer.id } &&
+                                    mutable.value.computer?.id != computer.id
+                            )
+                                mutable.update {
+                                    it.copy(
+                                        computerStatuses =
+                                            it.computerStatuses +
+                                                (computer.id to
+                                                    ComputerOverview(
+                                                        value,
+                                                        System.currentTimeMillis(),
+                                                    ))
+                                    )
+                                }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            if (
+                                profiles.computers.any { it.id == computer.id } &&
+                                    mutable.value.computer?.id != computer.id
+                            )
+                                mutable.update {
+                                    it.copy(
+                                        computerStatuses =
+                                            it.computerStatuses +
+                                                (computer.id to
+                                                    (it.computerStatuses[computer.id]
+                                                            ?: ComputerOverview())
+                                                        .copy(
+                                                            error = explain(e, false),
+                                                            checking = false,
+                                                        ))
+                                    )
+                                }
+                        } finally {
+                            closeClient(client)
+                            mutable.update { state ->
+                                state.computerStatuses[computer.id]?.let { overview ->
+                                    state.copy(
+                                        computerStatuses =
+                                            state.computerStatuses +
+                                                (computer.id to overview.copy(checking = false))
+                                    )
+                                } ?: state
+                            }
+                            limiter.release()
+                        }
+                    }
+                }
+                .joinAll()
         }
     }
 
@@ -420,25 +758,28 @@ constructor(
         viewModelScope.launch {
             try {
                 val response = action(source, before)
-                mutable.update { it.copy(notice = response.message) }
+                if (source === api) mutable.update { it.copy(notice = response.message) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                mutable.update {
-                    it.copy(
-                        notice =
-                            if (
-                                e is ApiException ||
-                                    e is IllegalArgumentException ||
-                                    e is IllegalStateException
-                            )
-                                e.message
-                            else "未确认操作结果，正在刷新电脑状态；请勿连续重复操作"
-                    )
-                }
+                if (source === api)
+                    mutable.update {
+                        it.copy(
+                            notice =
+                                if (
+                                    e is ApiException ||
+                                        e is IllegalArgumentException ||
+                                        e is IllegalStateException
+                                )
+                                    e.message
+                                else "未确认操作结果，正在刷新电脑状态；请勿连续重复操作"
+                        )
+                    }
             } finally {
-                refreshNow()
-                mutable.update { it.copy(busy = false) }
+                if (source === api) {
+                    mutable.update { it.copy(busy = false) }
+                    refreshNow()
+                }
             }
         }
     }
@@ -469,10 +810,10 @@ constructor(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (mutable.value.detailTarget == target)
+                if (source === api && mutable.value.detailTarget == target)
                     mutable.update { it.copy(detailsError = explain(e, false)) }
             } finally {
-                if (mutable.value.detailTarget == target)
+                if (source === api && mutable.value.detailTarget == target)
                     mutable.update { it.copy(detailsLoading = false) }
             }
         }
@@ -500,6 +841,7 @@ constructor(
         workbenchGeneration++
         catalogGeneration++
         adminQueryJob?.cancel()
+        configurationJob?.cancel()
         latestAdminQuery = null
         lastWorkbenchRefresh = 0L
         streamEpoch = ""
@@ -550,7 +892,8 @@ constructor(
                 } catch (_: Exception) {
                     /* Snapshot polling remains available during stream reconnect. */
                 }
-                mutable.update { it.copy(workbench = it.workbench.copy(streaming = false)) }
+                if (source === api)
+                    mutable.update { it.copy(workbench = it.workbench.copy(streaming = false)) }
                 delay(backoff)
                 backoff = (backoff * 2).coerceAtMost(15000)
             }
@@ -601,8 +944,18 @@ constructor(
                             cursor?.let { put("cursor", it) }
                         },
                     )
+                val threads =
+                    withContext(Dispatchers.Default) {
+                        page["data"].list().map { WorkThread.parse(it.obj()) }
+                    }
                 if (source !== api || generation != workbenchGeneration) return@launch
-                val threads = page["data"].list().map { WorkThread.parse(it.obj()) }
+                val backend = capabilities["backendScopeId"].text()
+                val oldDetail = mutable.value.workbench.detail
+                val changedBackend = oldDetail != null && oldDetail.backendScopeId != backend
+                if (changedBackend) {
+                    threadJob?.cancel()
+                    threadGeneration++
+                }
                 mutable.update {
                     it.copy(
                         workbench =
@@ -614,21 +967,41 @@ constructor(
                                     (if (more) it.workbench.threads + threads else threads)
                                         .distinctBy { t -> t.id },
                                 nextCursor = page["nextCursor"].text().ifBlank { null },
+                                detail = if (changedBackend) null else it.workbench.detail,
+                                openingThreadId =
+                                    if (changedBackend) null else it.workbench.openingThreadId,
+                                detailLoading =
+                                    if (changedBackend) false else it.workbench.detailLoading,
+                                approvals =
+                                    if (changedBackend) emptyList() else it.workbench.approvals,
                             )
                     )
                 }
+                if (changedBackend) mutable.update { it.copy(notice = "电脑会话后台已变化，请重新选择会话") }
+                else
+                    (oldDetail?.thread?.id ?: mutable.value.workbench.openingThreadId)?.let {
+                        openThread(it, quiet = oldDetail != null)
+                    }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (generation == workbenchGeneration)
+                if (source === api && generation == workbenchGeneration)
                     mutable.update {
                         it.copy(workbench = it.workbench.copy(error = e.message ?: "读取会话失败"))
                     }
             } finally {
-                if (generation == workbenchGeneration)
+                if (source === api && generation == workbenchGeneration)
                     mutable.update { it.copy(workbench = it.workbench.copy(loading = false)) }
             }
         }
+    }
+
+    private fun rememberThread(detail: ThreadDetail) {
+        val pc = mutable.value.computer?.id ?: return
+        val key = "$pc:${detail.backendScopeId}:${detail.thread.id}"
+        threadCache.remove(key)
+        threadCache[key] = detail
+        while (threadCache.size > 8) threadCache.remove(threadCache.keys.first())
     }
 
     fun openThread(id: String, quiet: Boolean = false, older: Boolean = false) {
@@ -645,8 +1018,21 @@ constructor(
         lastThreadRefresh = SystemClock.elapsedRealtime()
         val generation = ++threadGeneration
         val previous = mutable.value.workbench.detail?.takeIf { it.thread.id == id }
-        if (!quiet)
-            mutable.update { it.copy(workbench = it.workbench.copy(loading = true, error = null)) }
+        mutable.value.workbench.detail?.let(::rememberThread)
+        val pc = mutable.value.computer?.id.orEmpty()
+        val backend = mutable.value.workbench.capabilities?.get("backendScopeId").text()
+        val cached = previous ?: threadCache["$pc:$backend:$id"]
+        mutable.update {
+            it.copy(
+                workbench =
+                    it.workbench.copy(
+                        detail = cached,
+                        openingThreadId = id,
+                        detailLoading = !quiet,
+                        error = null,
+                    )
+            )
+        }
         threadJob = viewModelScope.launch {
             try {
                 val result =
@@ -657,9 +1043,12 @@ constructor(
                             if (older) previous?.nextCursor?.let { put("cursor", it) }
                         },
                     )
-                var detail = ThreadDetail.parse(result)
+                var detail = withContext(Dispatchers.Default) { ThreadDetail.parse(result) }
                 if (source !== api || generation != threadGeneration) return@launch
-                val live = mutable.value.workbench.detail?.takeIf { it.thread.id == id }
+                val live =
+                    mutable.value.workbench.detail?.takeIf {
+                        it.thread.id == id && it.backendScopeId == detail.backendScopeId
+                    }
                 if (older && live != null)
                     detail =
                         live.copy(
@@ -673,11 +1062,13 @@ constructor(
                             activeTurn = live.activeTurn,
                             thread = detail.thread.copy(status = live.thread.status),
                         )
+                rememberThread(detail)
                 mutable.update {
                     it.copy(
                         workbench =
                             it.workbench.copy(
                                 detail = outgoingMessages.decorate(detail),
+                                openingThreadId = id,
                                 approvals =
                                     result["events"].obj()["approvals"].list().map { a -> a.obj() },
                                 error = null,
@@ -687,21 +1078,32 @@ constructor(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (generation == threadGeneration)
+                if (source === api && generation == threadGeneration)
                     mutable.update {
                         it.copy(workbench = it.workbench.copy(error = e.message ?: "读取会话失败"))
                     }
             } finally {
-                if (generation == threadGeneration)
-                    mutable.update { it.copy(workbench = it.workbench.copy(loading = false)) }
+                if (source === api && generation == threadGeneration)
+                    mutable.update { it.copy(workbench = it.workbench.copy(detailLoading = false)) }
             }
         }
     }
 
     fun closeThread() {
+        mutable.value.workbench.detail?.let(::rememberThread)
         threadGeneration++
         threadJob?.cancel()
-        mutable.update { it.copy(workbench = it.workbench.copy(detail = null, error = null)) }
+        mutable.update {
+            it.copy(
+                workbench =
+                    it.workbench.copy(
+                        detail = null,
+                        openingThreadId = null,
+                        detailLoading = false,
+                        error = null,
+                    )
+            )
+        }
         loadWorkbench()
     }
 
@@ -735,7 +1137,7 @@ constructor(
         val source = api ?: return
         if (mutable.value.configurationLoading) return
         mutable.update { it.copy(configurationLoading = true, adminError = null) }
-        viewModelScope.launch {
+        configurationJob = viewModelScope.launch {
             try {
                 val value =
                     WireJson.decodeFromJsonElement<ConfigurationEnvelope>(
@@ -745,9 +1147,9 @@ constructor(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                mutable.update { it.copy(adminError = e.message) }
+                if (source === api) mutable.update { it.copy(adminError = e.message) }
             } finally {
-                mutable.update { it.copy(configurationLoading = false) }
+                if (source === api) mutable.update { it.copy(configurationLoading = false) }
             }
         }
     }
@@ -775,10 +1177,10 @@ constructor(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (generation == catalogGeneration)
+                if (source === api && generation == catalogGeneration)
                     mutable.update { it.copy(adminError = e.message) }
             } finally {
-                if (generation == catalogGeneration)
+                if (source === api && generation == catalogGeneration)
                     mutable.update { it.copy(adminLoading = false) }
             }
         }
@@ -982,8 +1384,10 @@ constructor(
                     )
                 }
             } finally {
-                mutable.update { it.copy(busy = false) }
-                refreshNow()
+                if (source === api) {
+                    mutable.update { it.copy(busy = false) }
+                    refreshNow()
+                }
             }
         }
         return true

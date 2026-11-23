@@ -1,10 +1,11 @@
 # Launcher Mobile
 
-A native Android control center for a paired development PC, built with Kotlin and Jetpack Compose. Requires Android 8.0 or later.
+A native Android control center for your paired development PCs, built with Kotlin and Jetpack Compose. Requires Android 8.0 or later.
 
 The original Launcher icon is retained. The interface uses a neutral iOS-inspired theme, a searchable conversation sidebar, grouped settings, and a floating composer. Light/dark themes, native animations, large text, and live updates are supported.
 
 <p>
+  <img src="docs/screenshots/computers-light.png" width="220" alt="Switch between paired computers" />
   <img src="docs/screenshots/sidebar-light.png" width="220" alt="Searchable conversation sidebar" />
   <img src="docs/screenshots/conversation-clean-model-light.png" width="220" alt="Conversation with current model" />
   <img src="docs/screenshots/conversation-attachment-draft-light.png" width="220" alt="Attachment draft above the composer" />
@@ -15,6 +16,8 @@ Screenshots are rendered from the native Compose UI using synthetic test data. S
 
 ## Features
 
+- **My computers:** save up to 16 PCs, switch the active destination, see individual connectivity and run summaries, and edit local names or alternate addresses. Credentials are encrypted; the original single-PC record migrates automatically.
+- **Connectivity:** independent heartbeat and event transports, bounded read retries, authenticated LAN/Tailscale failover, recent conversation caches, and separate connection/loading feedback.
 - **Overview:** PC connectivity, ANY acquisition and keep-alive status, pending approvals, and recent sessions.
 - **Workbench:** conversation-first layout, current model, session naming and renaming, pull-down history loading, a searchable sidebar, original-session or branch selection, AI replies, execution records and file changes in the session menu, steering, interruption, and supported Codex approvals.
 - **Attachments:** system photo/file pickers, camera import, private per-session drafts, resumable uploads, pure image/file messages, image previews, bounded text reading, and attachment history across branches. See [attachments](docs/attachments.md) for limits and supported content.
@@ -25,14 +28,17 @@ Only the Android client, public protocol documentation, release automation, and 
 
 ## Connect
 
-1. Run Launcher desktop **2.8.0-beta.2 or later** for attachments and resolved run models; beta.1 remains compatible with text conversations and existing controls.
+1. Run Launcher desktop **2.8.0-beta.3 or later** for automatic LAN/Tailscale listeners and connection alternatives. Beta.2 retains attachments and resolved run models; beta.1 retains text conversations and existing controls.
 2. Enable mobile connections on a LAN or Tailscale IPv4 address.
 3. Grant full management access for configuration and workbench controls.
 4. Scan the one-time QR code or paste its payload into the app.
+5. Tap the computer name or open **Settings → My computers** to add another PC and switch between them. Each PC needs its own pairing.
 
 The original v1 pairing protocol is retained: HTTPS, an exact certificate fingerprint, one-use pairing tokens, expiring device credentials, and Android Keystore storage. Devices without control permission can view the original run dashboard only. Older PCs can still provide v1 run status and controls.
 
 The PC and Launcher must remain running. Disconnecting the phone does not cancel PC tasks. Development tools execute on the PC.
+
+On a shared Wi-Fi network or phone hotspot, a reachable local address can avoid a relayed Tailscale path. On other networks, Tailscale must be online on both devices. If the original address is already unreachable, enter an address shown on the PC's connection page under **My computers → Edit name and address**, or pair again using that address. See [multiple computers and connectivity](docs/computers.md).
 
 ## Session compatibility
 

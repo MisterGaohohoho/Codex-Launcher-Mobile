@@ -123,18 +123,32 @@ fun CompanionApp(model: CompanionViewModel = viewModel()) {
         }
     LauncherTheme(dark = dark) {
         val attachmentPicker = rememberAttachmentPicker(model::importAttachments)
+        val computerId = state.computer?.id
+        // A sheet or an outgoing animation can retain callbacks from the previous PC.
+        val onComputer: (() -> Unit) -> Unit = { action ->
+            if (
+                model.state.value.computer?.id == computerId && !model.state.value.switchingComputer
+            )
+                action()
+        }
         LauncherScreen(
             state,
             now,
             cameraError,
             LauncherActions(
-                refresh = model::refresh,
-                start = model::start,
-                stop = model::stop,
-                keepAlive = { enabled, mode, run -> model.keepAlive(enabled, mode, run) },
+                refresh = { onComputer { model.refresh() } },
+                start = { run -> onComputer { model.start(run) } },
+                stop = { run -> onComputer { model.stop(run) } },
+                keepAlive = { enabled, mode, run ->
+                    onComputer { model.keepAlive(enabled, mode, run) }
+                },
                 theme = model::theme,
                 pair = model::pair,
-                forget = model::forget,
+                forget = { onComputer { model.forget() } },
+                selectComputer = model::selectComputer,
+                editComputer = model::editComputer,
+                removeComputer = model::removeComputer,
+                refreshComputers = model::refreshComputers,
                 scan = {
                     cameraError = null
                     if (
@@ -144,32 +158,44 @@ fun CompanionApp(model: CompanionViewModel = viewModel()) {
                         launchScan()
                     else permission.launch(Manifest.permission.CAMERA)
                 },
-                openDetails = model::openDetails,
-                closeDetails = model::closeDetails,
-                refreshDetails = model::refreshDetails,
+                openDetails = { worker -> onComputer { model.openDetails(worker) } },
+                closeDetails = { onComputer { model.closeDetails() } },
+                refreshDetails = { onComputer { model.refreshDetails() } },
                 consumeNotice = model::consumeNotice,
                 loadWorkbench = { search, archived, more ->
-                    model.loadWorkbench(search, archived, more)
+                    onComputer { model.loadWorkbench(search, archived, more) }
                 },
-                openThread = { model.openThread(it) },
-                closeThread = model::closeThread,
+                openThread = { id -> onComputer { model.openThread(id) } },
+                closeThread = { onComputer { model.closeThread() } },
                 olderMessages = {
-                    state.workbench.detail?.thread?.id?.let { model.openThread(it, older = true) }
+                    onComputer {
+                        state.workbench.detail?.thread?.id?.let {
+                            model.openThread(it, older = true)
+                        }
+                    }
                 },
-                workbenchAction = model::workbenchAction,
+                workbenchAction = { action, input ->
+                    onComputer { model.workbenchAction(action, input) }
+                },
                 editDraft = model::editDraft,
                 importAttachments = model::importAttachments,
                 pickAttachment = attachmentPicker,
                 removeAttachment = model::removeAttachment,
-                resumeMessage = { id, accept -> model.resumeMessage(id, accept) },
-                pauseMessage = model::pauseMessage,
-                discardMessage = model::discardMessage,
+                resumeMessage = { id, accept -> onComputer { model.resumeMessage(id, accept) } },
+                pauseMessage = { id -> onComputer { model.pauseMessage(id) } },
+                discardMessage = { id -> onComputer { model.discardMessage(id) } },
                 loadAttachment = model::loadAttachment,
-                loadConfiguration = model::loadConfiguration,
-                saveConfiguration = model::saveConfiguration,
-                adminQuery = { resource, input -> model.adminQuery(resource, input) },
-                adminCommand = { action, input -> model.adminCommand(action, input) },
-                retryCommand = model::retryUncertainCommand,
+                loadConfiguration = { onComputer { model.loadConfiguration() } },
+                saveConfiguration = { revision, patch ->
+                    onComputer { model.saveConfiguration(revision, patch) }
+                },
+                adminQuery = { resource, input ->
+                    onComputer { model.adminQuery(resource, input) }
+                },
+                adminCommand = { action, input ->
+                    onComputer { model.adminCommand(action, input) }
+                },
+                retryCommand = { onComputer { model.retryUncertainCommand() } },
                 checkUpdate = model::checkUpdate,
                 downloadUpdate = model::downloadUpdate,
                 installUpdate = {

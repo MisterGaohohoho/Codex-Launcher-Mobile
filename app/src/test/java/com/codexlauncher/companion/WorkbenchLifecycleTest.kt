@@ -246,6 +246,9 @@ class WorkbenchLifecycleTest {
         val model = model(api)
         model.openThread("previous")
         model.workbenchAction("attach", buildJsonObject { put("threadId", "desktop-original") })
+        awaitState(model) {
+            it.workbench.detail?.thread?.id == "desktop-original" && !it.workbench.detailLoading
+        }
         assertEquals("desktop-original", model.state.value.workbench.detail?.thread?.id)
         assertEquals("workbench.attach", api.requests.single().action)
         assertEquals("desktop-original", api.requests.single().input["threadId"].text())
@@ -256,6 +259,9 @@ class WorkbenchLifecycleTest {
         val api = FakeApi()
         val model = model(api)
         model.workbenchAction("fork", buildJsonObject { put("threadId", "original") })
+        awaitState(model) {
+            it.workbench.detail?.thread?.id == "fork-fixture" && !it.workbench.detailLoading
+        }
         assertEquals("fork-fixture", model.state.value.workbench.detail?.thread?.id)
         api.commandGate = CompletableDeferred()
         model.workbenchAction(
@@ -301,6 +307,9 @@ class WorkbenchLifecycleTest {
         model.setForeground(false)
         model.setForeground(true)
         model.openThread("fork-fixture")
+        awaitState(model) {
+            it.workbench.detail?.thread?.id == "fork-fixture" && !it.workbench.detailLoading
+        }
         assertEquals(
             sent,
             model.state.value.workbench.detail!!.items.single { it.kind == "userMessage" },
@@ -316,8 +325,10 @@ class WorkbenchLifecycleTest {
                     )
             )
         )
-        assertEquals("server-fixture", model.state.value.workbench.detail!!.items.single().id)
-        assertFalse(model.state.value.workbench.detail!!.items.single().localEcho)
+        val received =
+            model.state.value.workbench.detail!!.items.single { it.kind == "userMessage" }
+        assertEquals("server-fixture", received.id)
+        assertFalse(received.localEcho)
     }
 
     @Test
@@ -326,6 +337,9 @@ class WorkbenchLifecycleTest {
         api.loseFirstReply = true
         val model = model(api)
         model.openThread("fixture")
+        awaitState(model) {
+            it.workbench.detail?.thread?.id == "fixture" && !it.workbench.detailLoading
+        }
         model.workbenchAction(
             "send",
             buildJsonObject {

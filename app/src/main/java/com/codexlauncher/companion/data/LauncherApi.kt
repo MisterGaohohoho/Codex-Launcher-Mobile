@@ -8,9 +8,12 @@ import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLException
 import javax.net.ssl.X509TrustManager
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.Flow
@@ -27,6 +30,11 @@ import okhttp3.RequestBody.Companion.toRequestBody
 class ApiException(val status: Int, message: String, val code: String = "") : IOException(message)
 
 interface CompanionApi {
+    val connectionInfo: ConnectionInfo
+        get() = ConnectionInfo()
+
+    fun updateEndpoints(endpoints: List<String>) {}
+
     suspend fun pair(code: PairingCode, name: String): PairResponse
 
     suspend fun snapshot(): Snapshot
@@ -78,8 +86,19 @@ interface CompanionApi {
 
 class LauncherApi(endpoint: String, fingerprint: String, private val token: String? = null) :
     CompanionApi {
-    private val base = validateEndpoint(endpoint)
+    private val routing = ConnectionRouting(endpoint)
+    private val base: HttpUrl
+        get() = routing.current
+
+    @Volatile
+    override var connectionInfo = ConnectionInfo(endpoint)
+        private set
+
+    override fun updateEndpoints(endpoints: List<String>) = routing.update(endpoints)
+
     private val pin = fingerprint.lowercase()
+
+    private fun elapsedNow(): Long = System.nanoTime() / 1_000_000
 
     init {
         require(pin.matches(Regex("[0-9a-f]{64}"))) { "证书指纹无效" }
@@ -115,9 +134,9 @@ class LauncherApi(endpoint: String, fingerprint: String, private val token: Stri
         OkHttpClient.Builder()
             .sslSocketFactory(tls.socketFactory, trust)
             .hostnameVerifier { hostname, session ->
-                // A LAN IP can change. Trust is the QR's exact endpoint AND leaf pin,
-                // never a blanket hostname/CA bypass for arbitrary destinations.
-                hostname == base.host &&
+                // Addresses come from pairing, an authenticated PC, or a user edit.
+                // Every destination must present the same pinned leaf certificate.
+                routing.allows(hostname) &&
                     runCatching {
                             sha256(session.peerCertificates.first() as X509Certificate) == pin
                         }
@@ -130,6 +149,22 @@ class LauncherApi(endpoint: String, fingerprint: String, private val token: Stri
             .readTimeout(8, TimeUnit.SECONDS)
             .callTimeout(12, TimeUnit.SECONDS)
             .build()
+
+    // Slow history, long-lived events and attachment transfers cannot queue the heartbeat.
+    private val healthClient =
+        client
+            .newBuilder()
+            .dispatcher(
+                Dispatcher().apply {
+                    maxRequestsPerHost = 4
+                    maxRequests = 8
+                }
+            )
+            .connectTimeout(3, TimeUnit.SECONDS)
+            .readTimeout(4, TimeUnit.SECONDS)
+            .callTimeout(6, TimeUnit.SECONDS)
+            .build()
+    private val streamClient = client.newBuilder().dispatcher(Dispatcher()).build()
 
     override suspend fun pair(code: PairingCode, name: String): PairResponse {
         val value: PairResponse =
@@ -147,11 +182,72 @@ class LauncherApi(endpoint: String, fingerprint: String, private val token: Stri
     }
 
     override suspend fun snapshot(): Snapshot {
-        val value: Snapshot = WireJson.decodeFromString(send("GET", "snapshot"))
-        require(value.protocolVersion == 1 && value.workers.size <= 256 && value.logs.size <= 200) {
-            "电脑返回的状态版本或大小不兼容"
+        return coroutineScope {
+            val endpoints = routing.plan(elapsedNow())
+            val results = Channel<Result<Pair<HttpUrl, Pair<Snapshot, Long>>>>(endpoints.size)
+            val calls = endpoints.mapIndexed { index, endpoint ->
+                launch {
+                    delay(index * 200L)
+                    val start = elapsedNow()
+                    try {
+                        val text =
+                            send(
+                                "GET",
+                                "snapshot",
+                                url =
+                                    endpoint
+                                        .newBuilder()
+                                        .addPathSegments("api/v1/snapshot")
+                                        .build(),
+                                transportOverride = healthClient,
+                            )
+                        val value =
+                            withContext(Dispatchers.Default) {
+                                WireJson.decodeFromString<Snapshot>(text)
+                            }
+                        require(
+                            value.protocolVersion == 1 &&
+                                value.workers.size <= 256 &&
+                                value.logs.size <= 200
+                        ) {
+                            "电脑返回的状态版本或大小不兼容"
+                        }
+                        results.send(Result.success(endpoint to (value to (elapsedNow() - start))))
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        routing.failed(endpoint, elapsedNow())
+                        results.send(Result.failure(e))
+                    }
+                }
+            }
+            var failure: Throwable = IOException("电脑暂时无法连接")
+            try {
+                repeat(endpoints.size) {
+                    val result = results.receive()
+                    result.getOrNull()?.let { (endpoint, response) ->
+                        routing.succeeded(endpoint)
+                        connectionInfo =
+                            ConnectionInfo(endpoint.toString().trimEnd('/'), response.second)
+                        if (response.first.connectionEndpoints.isNotEmpty())
+                            routing.update(response.first.connectionEndpoints)
+                        return@coroutineScope response.first
+                    }
+                    val error = result.exceptionOrNull()!!
+                    if (
+                        failure !is SSLException && failure !is ApiException ||
+                            error is SSLException ||
+                            error is ApiException
+                    )
+                        failure = error
+                }
+                throw failure
+            } finally {
+                // The bounded local channel can be collected with this scope. Closing it
+                // before cancelled producers exit can race an otherwise successful reply.
+                calls.forEach { it.cancel() }
+            }
         }
-        return value
     }
 
     override suspend fun details(run: String, worker: Int, attempt: Long): WorkerDetails {
@@ -163,7 +259,9 @@ class LauncherApi(endpoint: String, fingerprint: String, private val token: Stri
                 .addQueryParameter("runId", run)
                 .addQueryParameter("attempt", attempt.toString())
                 .build()
-        val value: WorkerDetails = WireJson.decodeFromString(send("GET", "", url = url))
+        val text = read("GET", url = url)
+        val value: WorkerDetails =
+            withContext(Dispatchers.Default) { WireJson.decodeFromString(text) }
         require(value.runId == run && value.workerId == worker && value.attempt == attempt) {
             "进程详情已变化，请刷新"
         }
@@ -181,15 +279,13 @@ class LauncherApi(endpoint: String, fingerprint: String, private val token: Stri
 
     override suspend fun query(resource: String, input: JsonObject): JsonObject {
         require(resource.matches(Regex("[a-z-]{1,64}")))
-        val value =
-            WireJson.parseToJsonElement(
-                send(
-                    "POST",
-                    "",
-                    input.toString(),
-                    base.newBuilder().addPathSegments("api/v2/query/$resource").build(),
-                )
+        val text =
+            read(
+                "POST",
+                input.toString(),
+                base.newBuilder().addPathSegments("api/v2/query/$resource").build(),
             )
+        val value = withContext(Dispatchers.Default) { WireJson.parseToJsonElement(text) }
         return value as? JsonObject ?: buildJsonObject { put("data", value) }
     }
 
@@ -219,7 +315,7 @@ class LauncherApi(endpoint: String, fingerprint: String, private val token: Stri
                 .header("Authorization", "Bearer $token")
                 .build()
         val call =
-            client
+            streamClient
                 .newBuilder()
                 .callTimeout(0, TimeUnit.SECONDS)
                 .readTimeout(20, TimeUnit.SECONDS)
@@ -278,6 +374,8 @@ class LauncherApi(endpoint: String, fingerprint: String, private val token: Stri
 
     override fun close() {
         client.dispatcher.cancelAll()
+        healthClient.dispatcher.cancelAll()
+        streamClient.dispatcher.cancelAll()
         client.connectionPool.evictAll()
     }
 
@@ -416,11 +514,31 @@ class LauncherApi(endpoint: String, fingerprint: String, private val token: Stri
         )
     }
 
+    private suspend fun read(method: String, payload: String? = null, url: HttpUrl): String {
+        val started = elapsedNow()
+        try {
+            return send(method, "", payload, url)
+        } catch (e: IOException) {
+            // Retry only read operations, once, and only after a quick transport/server failure.
+            if (
+                e is SSLException ||
+                    e is ApiException && e.status !in listOf(408, 429, 502, 503, 504) ||
+                    elapsedNow() - started > 8_000
+            )
+                throw e
+            delay(if (e is ApiException && e.status == 429) 1_000 else 350)
+            val next = base
+            val retryUrl = url.newBuilder().host(next.host).port(next.port).build()
+            return send(method, "", payload, retryUrl)
+        }
+    }
+
     private suspend fun send(
         method: String,
         path: String,
         payload: String? = null,
         url: HttpUrl = base.newBuilder().addPathSegments("api/v1/$path").build(),
+        transportOverride: OkHttpClient? = null,
     ): String = suspendCancellableCoroutine { continuation ->
         val builder =
             Request.Builder()
@@ -433,13 +551,14 @@ class LauncherApi(endpoint: String, fingerprint: String, private val token: Stri
                 )
         token?.let { builder.header("Authorization", "Bearer $it") }
         val transport =
-            if (url.encodedPath.startsWith("/api/v2/"))
-                client
-                    .newBuilder()
-                    .readTimeout(40, TimeUnit.SECONDS)
-                    .callTimeout(45, TimeUnit.SECONDS)
-                    .build()
-            else client
+            transportOverride
+                ?: if (url.encodedPath.startsWith("/api/v2/"))
+                    client
+                        .newBuilder()
+                        .readTimeout(40, TimeUnit.SECONDS)
+                        .callTimeout(45, TimeUnit.SECONDS)
+                        .build()
+                else client
         val maxResponseBytes =
             if (url.encodedPath.startsWith("/api/v2/")) 4L * 1024 * 1024 else 1024L * 1024
         val call = transport.newCall(builder.build())

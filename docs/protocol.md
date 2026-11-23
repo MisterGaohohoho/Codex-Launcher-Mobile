@@ -6,6 +6,8 @@ Pair with the original v1 QR payload: a local HTTPS IPv4 endpoint, exact SHA-256
 
 Pairing stays at version **1**. New capabilities are advertised in the snapshot. All v2 endpoints require a full-control device.
 
+PC 2.8.0-beta.3 adds optional `connectionEndpoints: string[]` to authenticated pair responses and snapshots, plus the `connection.endpoints.v1` capability. These are actual listening private IPv4 HTTPS endpoints. They are not added to QR payloads, preserving strict v1 QR decoders. Every alternative must present the original pinned certificate before receiving the token. Profile identity is the lowercase certificate fingerprint, not the address. The Android client keeps up to 16 encrypted profiles and a separate outgoing-message record for each PC. See [connection routing and switching](computers.md).
+
 | Method | Existing endpoint | Purpose |
 | --- | --- | --- |
 | GET | `/api/v1/snapshot` | Run, workers, configuration summary, recent logs |

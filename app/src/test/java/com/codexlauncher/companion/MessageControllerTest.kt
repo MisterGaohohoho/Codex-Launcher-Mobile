@@ -7,9 +7,12 @@ import android.net.Uri
 import android.os.SystemClock
 import androidx.test.core.app.ApplicationProvider
 import com.codexlauncher.companion.data.*
+import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.time.Duration
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.*
 import kotlinx.coroutines.test.*
 import kotlinx.serialization.json.*
@@ -18,6 +21,7 @@ import org.junit.Assert.*
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowSystemClock
 
@@ -53,7 +57,7 @@ class MessageControllerTest {
         val target = DraftTarget("a".repeat(64), "backend-a", UUID.randomUUID().toString())
         val files = temporary.newFolder()
         private val cache = temporary.newFolder()
-        private val context =
+        val context =
             object : ContextWrapper(ApplicationProvider.getApplicationContext()) {
                 override fun getFilesDir() = files
 
@@ -213,6 +217,43 @@ class MessageControllerTest {
                 error("Unused")
 
             override fun close() {}
+        }
+    }
+
+    @Test
+    fun aLocalImportFinishingWhileAnotherPcIsSelectedDoesNotLeaveTheCachedPcStuck() {
+        val f = Fixture()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val uri = Uri.parse("content://fixture/import-after-switch")
+        val bytes =
+            object : ByteArrayInputStream("Another local file".toByteArray()) {
+                override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                    entered.countDown()
+                    check(release.await(5, TimeUnit.SECONDS))
+                    return super.read(buffer, offset, length)
+                }
+            }
+        shadowOf(f.context.contentResolver).registerInputStream(uri, bytes)
+        try {
+            f.controller.import(f.target, listOf(uri), false)
+            assertTrue(entered.await(3, TimeUnit.SECONDS))
+            val cachedA = f.state
+            assertTrue(f.target.key in cachedA.importingAttachments)
+            f.state =
+                f.state.copy(
+                    computer = f.state.computer!!.copy(certificateSha256 = "c".repeat(64)),
+                    importingAttachments = emptySet(),
+                )
+            release.countDown()
+            awaitState { f.state.attachmentDrafts[f.target.key]?.attachments?.size == 2 }
+            f.state = cachedA
+            f.controller.publish()
+            assertFalse(f.target.key in f.state.importingAttachments)
+            assertEquals(2, f.state.attachmentDrafts[f.target.key]!!.attachments.size)
+            assertTrue(f.submitted.isEmpty())
+        } finally {
+            release.countDown()
         }
     }
 

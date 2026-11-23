@@ -240,6 +240,8 @@ data class WorkbenchState(
     val approvals: List<JsonObject> = emptyList(),
     val models: List<JsonObject> = emptyList(),
     val loading: Boolean = false,
+    val detailLoading: Boolean = false,
+    val openingThreadId: String? = null,
     val error: String? = null,
     val streaming: Boolean = false,
     val search: String = "",

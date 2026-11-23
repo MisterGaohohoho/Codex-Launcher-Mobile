@@ -20,13 +20,23 @@ interface SessionStore {
 
     fun clear()
 
+    fun loadProfiles(): ComputerProfiles =
+        load()?.let { ComputerProfiles().upsert(it) } ?: ComputerProfiles()
+
+    fun saveProfiles(value: ComputerProfiles) {
+        value.active?.let(::save) ?: clear()
+    }
+
     var theme: String
 }
 
-class DeviceStore(context: Context) : SessionStore {
+class DeviceStore(context: Context, private val suppliedKey: SecretKey? = null) : SessionStore {
     private val prefs = context.getSharedPreferences("companion-v1", Context.MODE_PRIVATE)
 
     private fun key(): SecretKey {
+        suppliedKey?.let {
+            return it
+        }
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (store.getKey(ALIAS, null) as? SecretKey)?.let {
             return it
@@ -47,9 +57,25 @@ class DeviceStore(context: Context) : SessionStore {
             .generateKey()
     }
 
-    override fun load(): PairedComputer? {
-        val stored = prefs.getString("encrypted_device", null) ?: return null
-        require(stored.length <= 16384)
+    override fun load(): PairedComputer? = loadProfiles().active
+
+    @Synchronized
+    override fun loadProfiles(): ComputerProfiles {
+        prefs.getString("encrypted_computers_v2", null)?.let {
+            return WireJson.decodeFromString<ComputerProfiles>(decrypt(it, 512 * 1024)).validate()
+        }
+        val legacy = prefs.getString("encrypted_device", null) ?: return ComputerProfiles()
+        val profiles =
+            ComputerProfiles()
+                .upsert(WireJson.decodeFromString<PairedComputer>(decrypt(legacy, 16384)))
+                .validate()
+        // One atomic preferences commit stores the complete list before retiring v1.
+        saveProfiles(profiles)
+        return profiles
+    }
+
+    private fun decrypt(stored: String, limit: Int): String {
+        require(stored.length <= limit)
         val parts = stored.split(':', limit = 2)
         require(parts.size == 2)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -60,15 +86,20 @@ class DeviceStore(context: Context) : SessionStore {
         )
         val plain = cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP))
         return try {
-            WireJson.decodeFromString<PairedComputer>(plain.toString(Charsets.UTF_8))
+            plain.toString(Charsets.UTF_8)
         } finally {
             plain.fill(0)
         }
     }
 
     // KTX edit returns Unit; credential writes must check commit's Boolean.
+    @Synchronized
+    override fun save(value: PairedComputer) = saveProfiles(loadProfiles().upsert(value))
+
     @SuppressLint("UseKtx")
-    override fun save(value: PairedComputer) {
+    @Synchronized
+    override fun saveProfiles(value: ComputerProfiles) {
+        value.validate()
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key())
         val plain = WireJson.encodeToString(value).toByteArray(Charsets.UTF_8)
@@ -82,12 +113,21 @@ class DeviceStore(context: Context) : SessionStore {
             Base64.encodeToString(cipher.iv, Base64.NO_WRAP) +
                 ":" +
                 Base64.encodeToString(encrypted, Base64.NO_WRAP)
-        check(prefs.edit().putString("encrypted_device", data).commit()) { "无法保存手机授权" }
+        check(
+            prefs
+                .edit()
+                .putString("encrypted_computers_v2", data)
+                .remove("encrypted_device")
+                .commit()
+        ) {
+            "无法保存电脑授权"
+        }
     }
 
-    @SuppressLint("UseKtx")
+    @Synchronized
     override fun clear() {
-        check(prefs.edit().remove("encrypted_device").commit()) { "无法移除手机授权" }
+        val current = loadProfiles()
+        saveProfiles(current.activeId?.let(current::remove) ?: current)
     }
 
     override var theme: String

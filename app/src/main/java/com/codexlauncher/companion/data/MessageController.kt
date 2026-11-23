@@ -28,6 +28,7 @@ class MessageController(
     private val downloads = Semaphore(2)
     private val edits = mutableMapOf<String, Job>()
     private val verificationJobs = mutableMapOf<String, Job>()
+    private val importing = mutableSetOf<String>()
 
     init {
         publish()
@@ -35,7 +36,13 @@ class MessageController(
 
     fun publish() {
         repository.getOrNull()?.state()?.let { data ->
-            change { it.copy(attachmentDrafts = data.drafts, pendingMessages = data.pending) }
+            change {
+                it.copy(
+                    attachmentDrafts = data.drafts,
+                    pendingMessages = data.pending,
+                    importingAttachments = importing.toSet(),
+                )
+            }
         }
     }
 
@@ -56,7 +63,7 @@ class MessageController(
         if (
             uris.isEmpty() ||
                 target.pc != current().computer?.certificateSha256 ||
-                target.key in current().importingAttachments
+                target.key in importing
         )
             return
         // A system picker can return while connection capabilities are still restoring.
@@ -65,7 +72,8 @@ class MessageController(
             AttachmentPolicy.parse(current().workbench.capabilities?.get("attachments")).takeIf {
                 it.upload
             } ?: AttachmentPolicy(upload = true)
-        change { it.copy(importingAttachments = it.importingAttachments + target.key) }
+        importing.add(target.key)
+        change { it.copy(importingAttachments = importing.toSet()) }
         scope.launch {
             try {
                 for (uri in uris.take(policy.maxCount.coerceAtMost(10))) {
@@ -77,6 +85,7 @@ class MessageController(
             } catch (error: Exception) {
                 notice(error)
             } finally {
+                importing.remove(target.key)
                 change { it.copy(importingAttachments = it.importingAttachments - target.key) }
             }
         }
@@ -131,6 +140,12 @@ class MessageController(
     fun pause() {
         jobs.values.toList().forEach { it.cancel() }
         previewJobs.values.toList().forEach { it.cancel() }
+    }
+
+    suspend fun pauseAndJoin() {
+        val active = (jobs.values + previewJobs.values + verificationJobs.values).toList()
+        active.forEach { it.cancel() }
+        active.joinAll()
     }
 
     fun pause(id: String) {

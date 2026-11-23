@@ -1,6 +1,6 @@
 # Mobile interface
 
-The 0.4 interface is implemented with native Jetpack Compose components. Its neutral palette and floating composer take visual inspiration from [Cherry Studio Mobile](https://github.com/CherryHQ/cherry-studio-app). Its searchable, swipeable conversation sidebar takes interaction inspiration from [Galaxies-dev's ChatGPT example](https://github.com/Galaxies-dev/chatgpt-clone-react-native). No application code or assets from those repositories are included.
+The 0.5 interface is implemented with native Jetpack Compose components. Its neutral palette and floating composer take visual inspiration from [Cherry Studio Mobile](https://github.com/CherryHQ/cherry-studio-app). Its searchable, swipeable conversation sidebar takes interaction inspiration from [Galaxies-dev's ChatGPT example](https://github.com/Galaxies-dev/chatgpt-clone-react-native). No application code or assets from those repositories are included.
 
 ## Navigation
 
@@ -11,9 +11,11 @@ The 0.4 interface is implemented with native Jetpack Compose components. Its neu
 
 The compact bottom navigation appears on the four main pages. Conversation and settings detail pages use the available height for their content. Android Back closes a sidebar or editor before leaving the current screen.
 
+Tap the computer name, sidebar footer, or **Settings → My computers** to switch PCs. The sheet shows separate run/connectivity summaries, supports local names and alternate addresses, and adds or removes profiles. Switching dismisses old command confirmations and keeps each PC's conversation state separate. See [computer switching](computers.md).
+
 ## Conversation controls
 
-Conversations open directly to messages. Execution records and file changes are available in the three-dot session menu, with a compact return-to-chat action. The subtitle prioritizes the current model before the project name.
+Conversations open directly to messages. Execution records and file changes are available in the three-dot session menu, with a compact return-to-chat action. The subtitle prioritizes the model, then the selected computer and project. Conversation loading is separate from PC connectivity: cached content remains visible during refresh, and uncached threads have loading, retry, and return actions.
 
 Tap the conversation title or choose Rename from the session menu. The sidebar's long-press sheet also offers Rename, and the new-session sheet accepts an optional name. Pull down at the top to load earlier history, or refresh when no earlier page remains; the explicit Load earlier button is retained. Prepending history preserves the reader's scroll anchor.
 

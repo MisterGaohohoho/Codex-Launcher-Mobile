@@ -35,6 +35,175 @@ class CompanionUiTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
     @Test
+    fun computerSwitcherShowsSeparateStatusAndEditsTheSelectedIdentity() {
+        val base = fixture()
+        val first = base.computer!!
+        val second = first.copy(certificateSha256 = "c".repeat(64), computerName = "旅行笔记本")
+        val offline = first.copy(certificateSha256 = "d".repeat(64), computerName = "家里的电脑")
+        val state =
+            base.copy(
+                computers = listOf(first, second, offline),
+                connectionInfo = ConnectionInfo(first.endpoint, 12),
+                computerStatuses =
+                    mapOf(
+                        second.id to
+                            ComputerOverview(
+                                base.snapshot?.copy(status = null),
+                                System.currentTimeMillis(),
+                            ),
+                        offline.id to
+                            ComputerOverview(
+                                base.snapshot,
+                                System.currentTimeMillis() - 120_000,
+                                error = "连接超时",
+                            ),
+                    ),
+            )
+        var selected: String? = null
+        var edited: Triple<String, String, String>? = null
+        var checks = 0
+        compose.setContent {
+            LauncherTheme(false) {
+                LauncherScreen(
+                    state,
+                    2000,
+                    actions =
+                        LauncherActions(
+                            refreshComputers = { checks++ },
+                            selectComputer = { selected = it },
+                            editComputer = { id, name, address ->
+                                edited = Triple(id, name, address)
+                            },
+                        ),
+                )
+            }
+        }
+        compose.onNodeWithTag("conversation-title").performClick()
+        compose.onNodeWithText("我的电脑").assertIsDisplayed()
+        compose.onNodeWithText("暂不可达").assertIsDisplayed()
+        assertEquals(1, checks)
+        capture("computers-light")
+        compose.onNodeWithContentDescription("管理旅行笔记本").performClick()
+        compose.onNodeWithText("编辑名称与地址").performClick()
+        compose.onNodeWithTag("computer-name").performTextReplacement("随身电脑")
+        compose.onNodeWithTag("computer-address").performTextReplacement("http://8.8.8.8:39173")
+        compose.onNodeWithText("保存").assertIsNotEnabled()
+        compose
+            .onNodeWithTag("computer-address")
+            .performTextReplacement("https://192.168.2.3:39173")
+        capture("computer-editor-light")
+        compose.onNodeWithText("保存").performClick()
+        assertEquals(Triple(second.id, "随身电脑", "https://192.168.2.3:39173"), edited)
+        compose.onNodeWithText("旅行笔记本").performClick()
+        assertEquals(second.id, selected)
+        compose.onNodeWithTag("add-computer").assertDoesNotExist()
+    }
+
+    @Test
+    fun switchingComputersClosesTheOldControlConfirmation() {
+        val first = fixture()
+        val second =
+            first.computer!!.copy(certificateSha256 = "e".repeat(64), computerName = "另一台电脑")
+        val state = mutableStateOf(first.copy(computers = listOf(first.computer!!, second)))
+        var stopped: String? = null
+        compose.setContent {
+            LauncherTheme(false) {
+                LauncherScreen(
+                    state.value,
+                    2000,
+                    actions = LauncherActions(stop = { stopped = it }),
+                )
+            }
+        }
+        compose.onNodeWithTag("run-control").performClick()
+        compose.onNodeWithText("确认").assertIsDisplayed()
+        compose.runOnIdle {
+            state.value =
+                state.value.copy(computer = second, snapshot = first.snapshot?.copy(status = null))
+        }
+        compose.onNodeWithText("确认").assertDoesNotExist()
+        assertNull(stopped)
+        compose.onNodeWithTag("conversation-title").performClick()
+        capture("computers-after-switch")
+    }
+
+    @Test
+    fun aSlowConversationKeepsThePcOnlineAndProvidesAnExitAndRetry() {
+        val state =
+            mutableStateOf(
+                fixture()
+                    .copy(
+                        workbench =
+                            WorkbenchState(openingThreadId = "fixture-chat", detailLoading = true)
+                    )
+            )
+        var closed = false
+        var retry: String? = null
+        compose.setContent {
+            LauncherTheme(false) {
+                LauncherScreen(
+                    state.value,
+                    2000,
+                    actions =
+                        LauncherActions(
+                            closeThread = { closed = true },
+                            openThread = { retry = it },
+                        ),
+                )
+            }
+        }
+        compose.onNodeWithTag("tab-1").performClick()
+        compose.onNodeWithText("正在加载会话…").assertIsDisplayed()
+        compose.onNodeWithText("正在连接电脑").assertDoesNotExist()
+        capture("conversation-loading")
+        compose.runOnIdle {
+            state.value =
+                state.value.copy(
+                    workbench =
+                        state.value.workbench.copy(detailLoading = false, error = "网络波动，请重试")
+                )
+        }
+        compose.onNodeWithText("重新加载").performClick()
+        assertEquals("fixture-chat", retry)
+        compose.onNodeWithText("返回会话列表").performClick()
+        assertTrue(closed)
+    }
+
+    @Test
+    @Config(sdk = [35], qualifiers = "w320dp-h800dp-port")
+    @Suppress("DEPRECATION")
+    fun narrowLargeTextKeepsComputerSwitchingAccessible() {
+        val configuration =
+            android.content.res.Configuration(compose.activity.resources.configuration)
+        configuration.fontScale = 1.6f
+        compose.activity.resources.updateConfiguration(
+            configuration,
+            compose.activity.resources.displayMetrics,
+        )
+        val base = fixture()
+        val first = base.computer!!
+        val second = first.copy(certificateSha256 = "f".repeat(64), computerName = "我的第二台开发电脑")
+        compose.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(1f, 1.6f)) {
+                LauncherTheme(true) {
+                    Box(Modifier.width(320.dp).fillMaxSize()) {
+                        ComputersSheet(
+                            base.copy(computers = listOf(first, second)),
+                            2000,
+                            LauncherActions(),
+                            {},
+                            {},
+                        )
+                    }
+                }
+            }
+        }
+        compose.onNodeWithText("我的电脑").assertIsDisplayed()
+        compose.onNodeWithTag("add-computer").performScrollTo().assertIsDisplayed()
+        capture("computers-narrow-large-dark")
+    }
+
+    @Test
     fun configurationEditorKeepsDecimalInputAndSendsOnlyChangedFields() {
         val configuration =
             ConfigurationEnvelope(
@@ -223,7 +392,7 @@ class CompanionUiTest {
             }
         }
         compose.onNodeWithTag("tab-1").performClick()
-        compose.onNodeWithText("gpt-5.4 · launcher").assertIsDisplayed()
+        compose.onNodeWithText("gpt-5.4 · 工作电脑 · launcher").assertIsDisplayed()
         compose.onNodeWithTag("thread-tab-1").assertDoesNotExist()
         compose.onNodeWithText("npm test\nAll tests passed").assertDoesNotExist()
         capture("conversation-clean-model-light")

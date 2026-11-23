@@ -415,7 +415,31 @@ fun WorkbenchDetailPage(
     settings: () -> Unit = {},
     confirm: (ConfirmAction) -> Unit,
 ) {
-    val detail = state.workbench.detail ?: return
+    val detail = state.workbench.detail
+    if (detail == null) {
+        Column(
+            Modifier.fillMaxSize().padding(24.dp).testTag("thread-loading"),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+        ) {
+            if (state.workbench.detailLoading) {
+                CircularProgressIndicator(Modifier.size(28.dp))
+                Text("正在加载会话…")
+                Text(
+                    "正在读取电脑上的历史消息",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Banner(state.workbench.error ?: "暂时无法读取这条会话", true)
+                Button(onClick = { state.workbench.openingThreadId?.let(actions.openThread) }) {
+                    Text("重新加载")
+                }
+            }
+            TextButton(onClick = actions.closeThread) { Text("返回会话列表") }
+        }
+        return
+    }
     val target = detail.draftTarget(state.computer)
     val savedDraft = state.attachmentDrafts[target.key]
     val draftAttachments = savedDraft?.attachments.orEmpty()
@@ -449,8 +473,12 @@ fun WorkbenchDetailPage(
             submittedId = null
         }
     }
-    LaunchedEffect(state.lastDraftSubmissionId) {
-        if (submittedId != null && state.lastDraftSubmissionId == submittedId) {
+    LaunchedEffect(state.lastDraftSubmissionId, state.pendingMessages.keys) {
+        if (
+            submittedId != null &&
+                (state.lastDraftSubmissionId == submittedId ||
+                    state.pendingMessages.containsKey(submittedId))
+        ) {
             if (draft == submitted) draft = ""
             submitted = null
             submittedId = null
@@ -464,7 +492,7 @@ fun WorkbenchDetailPage(
             state.pendingMessages.values.none {
                 it.target == target && it.state !in listOf("sent", "discarded")
             } &&
-            !state.workbench.loading &&
+            !state.workbench.detailLoading &&
             state.uncertainCommand == null
     val send = {
         if (canSend) {
@@ -640,7 +668,7 @@ fun WorkbenchDetailPage(
                 scroll.scrollToItem(leadingRows + visible.indexOfFirst { it.id == outgoingId })
         }
         PullToRefreshBox(
-            isRefreshing = state.workbench.loading,
+            isRefreshing = state.workbench.detailLoading,
             onRefresh = {
                 if (detail.nextCursor != null) actions.olderMessages()
                 else actions.openThread(detail.thread.id)
@@ -657,7 +685,7 @@ fun WorkbenchDetailPage(
                     item(key = "older-messages") {
                         TextButton(
                             onClick = actions.olderMessages,
-                            enabled = !state.workbench.loading,
+                            enabled = !state.workbench.detailLoading,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Text("加载更早记录")

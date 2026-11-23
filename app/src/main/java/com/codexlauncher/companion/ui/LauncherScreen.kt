@@ -36,6 +36,10 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 
 data class LauncherActions(
+    val selectComputer: (String) -> Unit = {},
+    val editComputer: (String, String, String) -> Unit = { _, _, _ -> },
+    val removeComputer: (String) -> Unit = {},
+    val refreshComputers: () -> Unit = {},
     val refresh: () -> Unit = {},
     val start: (String?) -> Unit = {},
     val stop: (String) -> Unit = {},
@@ -91,7 +95,9 @@ fun LauncherScreen(
     var page by rememberSaveable { mutableIntStateOf(0) }
     var subpage by rememberSaveable { mutableStateOf("") }
     var pairing by rememberSaveable { mutableStateOf(false) }
+    var computers by rememberSaveable { mutableStateOf(false) }
     var handledPairing by rememberSaveable { mutableLongStateOf(state.pairingGeneration) }
+    var navigationComputer by rememberSaveable { mutableStateOf(state.computer?.id) }
     var confirmation by remember { mutableStateOf<ConfirmAction?>(null) }
     var newThread by rememberSaveable { mutableStateOf(false) }
     var renameThread by rememberSaveable { mutableStateOf(false) }
@@ -103,7 +109,31 @@ fun LauncherScreen(
     val showPairing = !connected || pairing || state.pairing
     val fresh = state.fresh(now)
     val canControl = state.canControl(now)
-    val showThread = page == 1 && state.workbench.detail != null && subpage.isEmpty()
+    val showThread =
+        page == 1 &&
+            (state.workbench.detail != null || state.workbench.openingThreadId != null) &&
+            subpage.isEmpty()
+    val currentComputer by rememberUpdatedState(state.computer?.id)
+    val requestConfirmation: (ConfirmAction) -> Unit = { value ->
+        val target = state.computer?.id
+        confirmation = value.copy(action = { if (currentComputer == target) value.action() })
+    }
+    LaunchedEffect(state.computer?.id) {
+        if (navigationComputer != state.computer?.id) {
+            confirmation = null
+            newThread = false
+            renameThread = false
+            drawer.close()
+            // On recreation the profile can still be loading. Keep navigation for
+            // the same restored PC, but reset it when a different PC is selected.
+            if (state.computer != null) {
+                navigationComputer = state.computer.id
+                page = 0
+                subpage = ""
+            }
+        }
+    }
+    LaunchedEffect(computers) { if (computers) actions.refreshComputers() }
     val navigate: (Int) -> Unit = { next ->
         page = next
         subpage = ""
@@ -190,6 +220,10 @@ fun LauncherScreen(
                     closeDrawer()
                     settingsPage("workbench-settings")
                 },
+                computers = {
+                    closeDrawer()
+                    computers = true
+                },
             )
         },
     ) {
@@ -201,12 +235,14 @@ fun LauncherScreen(
                         Column(
                             Modifier.clickable(
                                     enabled =
-                                        showThread &&
-                                            canControl &&
-                                            state.workbench.detail?.thread?.canContinueOriginal ==
-                                                true
+                                        !showPairing &&
+                                            (!showThread ||
+                                                (canControl &&
+                                                    state.workbench.detail
+                                                        ?.thread
+                                                        ?.canContinueOriginal == true))
                                 ) {
-                                    renameThread = true
+                                    if (showThread) renameThread = true else computers = true
                                 }
                                 .testTag("conversation-title"),
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -226,7 +262,13 @@ fun LauncherScreen(
                                         "updates" -> "应用更新"
                                         else ->
                                             if (showThread)
-                                                state.workbench.detail?.thread?.title.orEmpty()
+                                                state.workbench.detail?.thread?.title
+                                                    ?: state.workbench.threads
+                                                        .firstOrNull {
+                                                            it.id == state.workbench.openingThreadId
+                                                        }
+                                                        ?.title
+                                                    ?: "加载会话"
                                             else destinations[page].first
                                     },
                                 fontWeight = FontWeight.SemiBold,
@@ -234,25 +276,35 @@ fun LauncherScreen(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
-                            Text(
-                                if (showPairing) "你的移动工作台"
-                                else if (showThread)
-                                    state.workbench.detail
-                                        ?.thread
-                                        ?.let { thread ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    if (showPairing) "你的移动工作台"
+                                    else if (showThread && state.workbench.detail != null)
+                                        state.workbench.detail.thread.let { thread ->
                                             thread.model.ifBlank { "模型未返回" } +
+                                                " · " +
+                                                state.computer?.displayName.orEmpty() +
                                                 " · " +
                                                 thread.project
                                         }
-                                        .orEmpty()
-                                else
-                                    state.computer?.computerName.orEmpty() +
-                                        if (fresh) " · 在线" else " · 离线",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                                    else
+                                        state.computer?.displayName.orEmpty() +
+                                            " · " +
+                                            state.connectionLabel(now),
+                                    modifier = Modifier.weight(1f, fill = false),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (!showPairing && !showThread)
+                                    Icon(
+                                        Icons.Outlined.ExpandMore,
+                                        "切换电脑",
+                                        Modifier.size(14.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                            }
                         }
                     },
                     navigationIcon = {
@@ -305,7 +357,13 @@ fun LauncherScreen(
         ) { padding ->
             Column(Modifier.padding(padding).fillMaxSize()) {
                 if (connected && !showPairing && !fresh)
-                    Banner(state.connectionError ?: "正在连接电脑…", error = true)
+                    Banner(
+                        if (state.connectionLabel(now) == "连接中断")
+                            state.connectionError ?: "电脑暂时无法连接，正在重试"
+                        else if (state.lastSyncAt > 0) "正在同步电脑状态，最近内容仍可查看"
+                        else "正在连接 ${state.computer?.displayName.orEmpty()}…",
+                        error = state.connectionLabel(now) == "连接中断",
+                    )
                 if (state.uncertainCommand != null)
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 16.dp),
@@ -345,22 +403,29 @@ fun LauncherScreen(
                         "credentials",
                         "schedule",
                         "maintenance" ->
-                            AdminPage(route, state, canControl, actions) { confirmation = it }
+                            AdminPage(route, state, canControl, actions, requestConfirmation)
                         "thread" ->
                             savedPages.SaveableStateProvider(
-                                "thread-" + state.workbench.detail?.thread?.id.orEmpty()
+                                "thread-" +
+                                    state.computer?.id.orEmpty() +
+                                    ":" +
+                                    state.workbench.detail?.backendScopeId.orEmpty() +
+                                    ":" +
+                                    (state.workbench.openingThreadId
+                                            ?: state.workbench.detail?.thread?.id)
+                                        .orEmpty()
                             ) {
                                 WorkbenchDetailPage(
                                     state,
                                     canControl,
                                     actions,
                                     settings = { settingsPage("workbench-settings") },
-                                    confirm = { confirmation = it },
+                                    confirm = requestConfirmation,
                                 )
                             }
                         "page-0" ->
                             OverviewPage(state, now, actions, navigate, settingsPage) {
-                                confirmation = it
+                                requestConfirmation(it)
                             }
                         "page-1" ->
                             WorkbenchListPage(
@@ -371,11 +436,17 @@ fun LauncherScreen(
                             )
                         "page-2" ->
                             RunPage(state, now, actions, { settingsPage("configuration") }) {
-                                confirmation = it
+                                requestConfirmation(it)
                             }
                         else ->
-                            SettingsPage(state, actions, settingsPage, { pairing = true }) {
-                                confirmation = it
+                            SettingsPage(
+                                state,
+                                actions,
+                                settingsPage,
+                                { pairing = true },
+                                computers = { computers = true },
+                            ) {
+                                requestConfirmation(it)
                             }
                     }
                 }
@@ -383,6 +454,17 @@ fun LauncherScreen(
         }
     }
     if (newThread) NewThreadSheet(state, canControl, actions) { newThread = false }
+    if (computers)
+        ComputersSheet(
+            state,
+            now,
+            actions,
+            add = {
+                computers = false
+                pairing = true
+            },
+            dismiss = { computers = false },
+        )
     if (renameThread)
         state.workbench.detail?.thread?.let {
             RenameThreadSheet(it, canControl, actions) { renameThread = false }

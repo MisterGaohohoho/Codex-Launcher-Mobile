@@ -100,6 +100,7 @@ fun LauncherSidebar(
     openThread: (String) -> Unit,
     create: () -> Unit,
     connectionSettings: () -> Unit,
+    computers: () -> Unit = {},
 ) {
     var search by rememberSaveable { mutableStateOf("") }
     LaunchedEffect(state.workbench.search) { search = state.workbench.search }
@@ -220,7 +221,10 @@ fun LauncherSidebar(
             }
         }
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+            Modifier.fillMaxWidth()
+                .clickable(onClick = computers)
+                .padding(horizontal = 20.dp, vertical = 12.dp)
+                .testTag("drawer-computers"),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainer) {
@@ -228,13 +232,13 @@ fun LauncherSidebar(
             }
             Column(Modifier.weight(1f).padding(start = 12.dp)) {
                 Text(
-                    state.computer?.computerName.orEmpty(),
+                    state.computer?.displayName.orEmpty(),
                     style = MaterialTheme.typography.titleSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    if (state.online) "电脑已连接" else "等待电脑连接",
+                    "我的电脑 · 点击切换",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
